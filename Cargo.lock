@@ -3,9 +3,17 @@
 version = 4
 
 [[package]]
+name = "rucc-abi"
+version = "0.1.0"
+dependencies = [
+ "rucc-tuple",
+]
+
+[[package]]
 name = "rucc-cross"
 version = "0.1.0"
 dependencies = [
+ "rucc-abi",
  "rucc-tuple",
 ]
 

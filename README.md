@@ -36,6 +36,7 @@ Claim 2 is the one that can end the project. It is stated second rather than las
 
 ```
 crates/rucc-tuple    the target tuple, the target table and the tier model
+crates/rucc-abi      the psABIs as descriptions, and the type layouts
 crates/rucc-cross    the command line tool, which is mostly print queries for now
 spec                 the seventeen documents
 docs                 generated, and TARGETS.md is the target table as published
@@ -58,7 +59,7 @@ The toolchain is pinned to Rust 1.98.0 in `rust-toolchain.toml`. The floor that 
 
 ## Status
 
-M0 is the target model. Everything after it is in the milestone list, and each milestone has a tracking issue whose checklist is the truth about what is done.
+M0 is the target model and it is released. M6 is in progress: the psABIs are described and the sysroot pipeline is next. Everything after that is in the milestone list, and each milestone has a tracking issue whose checklist is the truth about what is done.
 
 Nothing here is stable. The crates are published so that the compiler can depend on them by version rather than by path, and their Rust APIs will change without a major version bump until the target list stops moving.
 

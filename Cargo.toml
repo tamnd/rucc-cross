@@ -18,6 +18,7 @@ readme = "README.md"
 # that a partial publish cannot produce a mixed version build. Same rule as the compiler
 # repository, for the same reason.
 [workspace.dependencies]
+rucc-abi = { version = "=0.1.0", path = "crates/rucc-abi" }
 rucc-tuple = { version = "=0.1.0", path = "crates/rucc-tuple" }
 
 # Dependencies outside the workspace go here rather than in the crate that wants one, so that

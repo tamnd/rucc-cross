@@ -287,10 +287,18 @@ impl TargetTuple {
     /// the classic first cross compilation bug, because a corpus written and tested on x86-64
     /// contains code that assumes `char` holds negative values and it passes until the day it
     /// runs on ARM.
+    ///
+    /// The operating system overrides the architecture twice. Windows says signed everywhere
+    /// because the Microsoft ABI does, and Darwin says signed on AArch64 because Apple kept it
+    /// that way for source compatibility with the Intel Macs, against what AAPCS64 says. So
+    /// `aarch64-macos` and `aarch64-linux-gnu` are the same architecture with opposite answers,
+    /// which is the pair most likely to catch a corpus out.
     pub const fn char_is_signed(self) -> bool {
         match self.arch {
             Arch::X86_64 | Arch::X86 | Arch::S390x | Arch::Wasm32 => true,
-            Arch::Arm | Arch::Aarch64 | Arch::Arm64Ec => matches!(self.os, Os::Windows),
+            Arch::Arm | Arch::Aarch64 | Arch::Arm64Ec => {
+                matches!(self.os, Os::Windows) || self.os.is_darwin()
+            }
             Arch::Riscv64 | Arch::Riscv32 | Arch::LoongArch64 | Arch::PowerPc64 => false,
         }
     }

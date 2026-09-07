@@ -1,6 +1,6 @@
 [package]
-name = "rucc-cross"
-description = "Cross compilation tooling for rucc: target queries today, sysroots and stubs as the milestones land."
+name = "rucc-abi"
+description = "The psABIs for rucc, as descriptions read by one classifier rather than as one function per ABI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,6 @@ categories.workspace = true
 readme.workspace = true
 
 [dependencies]
-rucc-abi.workspace = true
 rucc-tuple.workspace = true
 
 [lints.rust]

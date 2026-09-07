@@ -161,6 +161,10 @@ fn plain_char_is_signed_on_x86_and_not_on_arm() {
     assert!(!parse("riscv64-linux-gnu").char_is_signed());
     // Windows on ARM is the exception, because the Microsoft ABI says signed everywhere.
     assert!(parse("aarch64-windows-msvc").char_is_signed());
+    // And Darwin is the other one, because Apple kept it signed for source compatibility with the
+    // Intel Macs. These two tuples are the same architecture with opposite answers.
+    assert!(parse("aarch64-macos").char_is_signed());
+    assert!(!parse("aarch64-linux-gnu").char_is_signed());
 }
 
 #[test]

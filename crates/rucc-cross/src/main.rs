@@ -5,7 +5,7 @@
 //! stubs, assemble sysroots and run the differential harness, and each of those arrives with the
 //! crate that implements it rather than as a pile of logic in this file.
 //!
-//! The argument parsing is by hand. There are four subcommands and no flags with values, so a
+//! The argument parsing is by hand. There are five subcommands and no flags with values, so a
 //! dependency here would be a dependency in the release artifact and in the audit surface, for
 //! a `match` on a string. `Cargo.toml` explains the rule and the day it stops being the right
 //! one is a day worth a paragraph in the pull request.
@@ -13,6 +13,7 @@
 use std::process::ExitCode;
 use std::str::FromStr;
 
+use rucc_abi::{AbiDescription, DataLayout, FloatType, Rule, abis};
 use rucc_tuple::{TARGETS, TargetTuple, lookup, planned_working_count};
 
 const USAGE: &str = "\
@@ -21,6 +22,7 @@ rucc-cross, the cross compilation tooling for rucc
 usage:
   rucc-cross targets              list every target and what is true of it
   rucc-cross info <tuple>         everything the compiler derives from one tuple
+  rucc-cross abi <tuple>          the type layout and the psABI, as described
   rucc-cross canonical <tuple>    the canonical spelling
   rucc-cross llvm-triple <tuple>  the LLVM spelling, for tools that want one
   rucc-cross --version
@@ -45,6 +47,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["info", tuple] => run(tuple, info),
+        ["abi", tuple] => run(tuple, abi),
         ["canonical", tuple] => run(tuple, |t| println!("{}", t.to_canonical_string())),
         ["llvm-triple", tuple] => run(tuple, |t| println!("{}", t.to_llvm_string())),
         _ => {
@@ -148,4 +151,154 @@ fn info(target: TargetTuple) {
             println!("tier           not in the table");
         }
     }
+}
+
+/// Print the type layout and the psABI for one tuple.
+///
+/// The layout half prints for every target, because it is derived from the tuple and there is
+/// always an answer. The ABI half prints only where there is a description, and says so plainly
+/// where there is not, because `spec/06-abis.md` opens by naming the failure this avoids: a
+/// program that works for months and then does not, because something answered a question about
+/// an ABI with the almost-right answer.
+fn abi(target: TargetTuple) {
+    let layout = DataLayout::for_target(target);
+
+    println!("target         {}", target.to_canonical_string());
+    println!("char           {}", if layout.char_is_signed { "signed" } else { "unsigned" });
+    println!("short          {} bytes", layout.short_size);
+    println!("int            {} bytes", layout.int_size);
+    println!("long           {} bytes", layout.long_size);
+    println!(
+        "long long      {} bytes, aligned to {}",
+        layout.long_long_size, layout.long_long_align
+    );
+    println!("pointer        {} bytes, aligned to {}", layout.pointer_size, layout.pointer_align);
+    println!("float          {}", float(layout.float));
+    println!("double         {}", float(layout.double));
+    println!("long double    {}", float(layout.long_double));
+    println!(
+        "bit-fields     {}",
+        match layout.bitfield_order {
+            rucc_abi::BitfieldOrder::LowestFirst => "first field in the low order bits",
+            rucc_abi::BitfieldOrder::HighestFirst => "first field in the high order bits",
+        }
+    );
+    match layout.max_field_align {
+        Some(cap) => println!("member align   capped at {cap} bytes"),
+        None => println!("member align   uncapped"),
+    }
+    println!("underscore     {}", if layout.leading_underscore { "yes" } else { "no" });
+    println!();
+
+    let Some(described) = abis::for_target(target) else {
+        println!("abi            not described yet");
+        println!();
+        println!(
+            "The type layout above is still correct, because it comes from the tuple. What is"
+        );
+        println!("missing is how a value travels in a call, and answering that with a nearby ABI");
+        println!("would be worse than not answering it.");
+        return;
+    };
+    rules(described);
+}
+
+/// One floating point type, as the two separate facts it is.
+fn float(kind: FloatType) -> String {
+    format!("{}, {} bytes, aligned to {}", kind.format.name(), kind.size, kind.align)
+}
+
+/// Print the description of one ABI, in the order the classifier reads it.
+fn rules(described: &'static AbiDescription) {
+    println!("abi            {}", described.name);
+    if described.banks.shared {
+        println!("registers      {} shared argument positions", described.banks.integer);
+    } else {
+        println!(
+            "registers      {} integer, {} floating point",
+            described.banks.integer, described.banks.float
+        );
+    }
+    println!(
+        "widths         {} byte integer registers, {} byte vector registers",
+        described.banks.integer_width, described.banks.float_width
+    );
+    if let Some(format) = described.scalars.in_memory {
+        println!("in memory      a scalar {} argument, spending no register", format.name());
+    }
+    if described.scalars.wide_integer_is_all_or_nothing {
+        println!("wide integers  take every register they need or none of them");
+    }
+    println!(
+        "return pointer {}",
+        match described.return_pointer {
+            rucc_abi::ReturnPointer::FirstArgument =>
+                "a hidden first argument, spending a register",
+            rucc_abi::ReturnPointer::Dedicated => "a register outside the argument bank",
+        }
+    );
+    println!(
+        "variadic       {}",
+        match described.variadic {
+            rucc_abi::Variadic::SameAsFixed => "classified the same way a fixed argument is",
+            rucc_abi::Variadic::AlwaysMemory =>
+                "always in the argument area, whatever registers are left",
+            rucc_abi::Variadic::BothBanks => "a floating point value travels in both banks",
+        }
+    );
+    println!(
+        "stack args     {}",
+        match described.stack_args {
+            rucc_abi::StackArgs::RegisterSized => "a whole register's worth each",
+            rucc_abi::StackArgs::Packed => "packed at their natural size",
+        }
+    );
+
+    for (which, list) in [("returns", described.returns), ("arguments", described.arguments)] {
+        println!();
+        println!("{which}");
+        for rule in list {
+            println!("  {}", rule_line(rule));
+        }
+    }
+}
+
+/// One rule, as a sentence.
+fn rule_line(rule: &Rule) -> String {
+    use rucc_abi::{Short, Test, Travel};
+
+    let when = match rule.when {
+        Test::Anything => "anything else".to_string(),
+        Test::Empty => "an aggregate of no size".to_string(),
+        Test::SizeOneOf(sizes) => {
+            let list: Vec<String> = sizes.iter().map(u64::to_string).collect();
+            format!("a size of exactly {} bytes", list.join(", "))
+        }
+        Test::SizeAtMost(size) => format!("at most {size} bytes"),
+        Test::Homogeneous { limit } => {
+            format!("at most {limit} floating point members of one type and nothing else")
+        }
+        Test::FloatPair => "one or two members with a floating point member among them".to_string(),
+        Test::X87Stack => "one x87 long double, or two if it is a _Complex".to_string(),
+        Test::Eightbytes { limit } => {
+            format!("at most {limit} bytes that classify into eightbytes")
+        }
+    };
+    let then = match rule.then {
+        Travel::Ignore => "travels nowhere",
+        Travel::AsFound => "travels in the registers the rule found",
+        Travel::AsIntegers => "travels in integer registers, one per register width",
+        Travel::AsOneInteger => "travels in one integer register of its exact size",
+        Travel::ByReference => "travels as the address of a copy",
+        Travel::InMemory => "travels in the argument area",
+    };
+    let short = match rule.short {
+        Short::Unchanged => "",
+        Short::Memory => ", and short of registers goes to the argument area",
+        Short::MemoryAndDrain => {
+            ", and short of registers goes to the argument area with the rest of that bank"
+        }
+        Short::TryNextRule => ", and short of registers falls through to the rule below",
+    };
+    format!("{when} {then}{short}")
 }
