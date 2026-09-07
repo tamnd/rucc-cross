@@ -1,0 +1,18 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Sysroots, stub libraries and header trees. Large, machine specific, and regenerable, which is
+# the whole point of generating them.
+/sysroots
+/cache
+/dist
+*.tar.gz
+*.tar.xz
+*.zip
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
