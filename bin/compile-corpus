@@ -1,0 +1,49 @@
+#!/bin/sh
+# Compile the corpus for every target the reference compiler can reach.
+#
+# usage: bin/compile-corpus [tuple]...
+#
+# With no arguments it does every row of the targets table that has a spelling for the current
+# reference. With arguments it does those rows and nothing else, which is what you want when one
+# of them just went red.
+#
+# Only the layout corpus runs here. It is `-c` with no libc and no linking, so it works for the
+# freestanding rows as well as the hosted ones and it says something about all forty two targets
+# rather than about the fifteen that have a machine to run on. The corpus that has to execute is
+# bin/run-corpus, and it needs qemu.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+reference=${RUCC_CROSS_REFERENCE:-zig}
+
+column=2
+[ "$reference" = zig ] || column=3
+
+if [ $# -gt 0 ]; then
+	tuples=$*
+else
+	tuples=$(awk -F'\t' -v c="$column" '/^[^#]/ && NF > 1 && $c != "-" { print $1 }' "$here/targets")
+fi
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT INT TERM
+
+passed=0
+failed=0
+for tuple in $tuples; do
+	for source in "$here"/corpus/layout/*.c; do
+		name=$(basename "$source" .c)
+		if "$here/bin/reference-cc" "$tuple" -std=c17 -Wall -Wextra -Werror \
+			-c -o "$out/$name.o" "$source" 2>"$out/$name.log"; then
+			passed=$((passed + 1))
+		else
+			failed=$((failed + 1))
+			printf '%s: %s did not compile\n' "$tuple" "$name" >&2
+			sed 's/^/    /' "$out/$name.log" >&2
+		fi
+	done
+done
+
+printf 'corpus: %d compiled, %d failed, against %s\n' "$passed" "$failed" "$reference" >&2
+[ "$failed" -eq 0 ]

@@ -1,56 +1,51 @@
 # Contributing
 
-## Getting set up
+## The gate
 
 ```
-cargo build --workspace
-cargo test --workspace
-cargo xtask style
-cargo xtask targets --check
+bin/lint
+toolchains/install zig
+bin/facts --check
+bin/compile-corpus
+bin/run-corpus
 ```
 
-That is the whole gate. If those four pass locally they pass in CI, and if they do not then either the gate is wrong or your machine is, and both are worth knowing about before you open a pull request.
+That is the whole of it, and CI runs the same five commands. The last one needs qemu and prints `skipped` for every row it has no emulator for, which is every row on a mac.
 
-The toolchain is pinned to Rust 1.98.0 in `rust-toolchain.toml`, so rustup will fetch it the first time you build. The floor is 1.85.0 and CI checks it separately.
+If `bin/facts --check` fails, read the diff before you run `bin/facts --record`. A facts file changing means either the reference compiler moved or a target's definition did, and both are worth a sentence in the commit message. Recording a diff you did not read turns a finding into a fact.
 
-## Where code goes
+## Adding a toolchain
 
-`crates/rucc-tuple` is the target model. It has no dependencies, it is what the compiler imports, and everything else in the repository reads from it. A change here that adds a target is a data change and should touch only the table.
+```
+toolchains/record-hash gcc 16.1 x86_64-linux https://example.invalid/gcc-16.1.tar.xz
+```
 
-`crates/rucc-cross` is the command line tool. It is mostly print queries today, and it grows a subcommand per milestone as the stub generator, the sysroot assembler and the differential harness arrive. Each of those lives in its own crate and the tool wires it up, so that the logic is testable without a process.
+Paste the line it prints into `toolchains/manifest` and say in the commit message where the URL came from and who publishes it. The script does not edit the manifest on purpose: a file a script appends to is a file nobody reviews, and the point of pinning is that somebody looked.
 
-`xtask` is the house rules. Adding one is fine, and it should be a check somebody can run and not just a paragraph in a document.
+## Adding a target
 
-`spec/` is the seventeen specification documents. They are the argument for what is being built and why, and changing what the code does without changing the document that promised something else leaves the next person reading a lie.
+Add the row to `targets` with the spelling for every tool that has one. Do not write a spelling you have not run. The zig column was built by trying each candidate and keeping the ones that worked, and three of them did not, which is a fact worth having rather than a gap to paper over.
 
-## The prose rules
+Then run `bin/facts --record` and `bin/compile-corpus` and commit what comes out.
 
-`cargo xtask style` checks three things on every markdown file, and they are the same rules the compiler repository enforces, so that a paragraph can move between the two without being reformatted.
+## Adding to the corpus
 
-No em dash and no en dash. Every use of one is a comma, a colon, a full stop or a pair of brackets that the writer did not choose between, and choosing is the writing.
+An assertion needs a reason next to it, in a sentence, in the file. `_Static_assert(_Alignof(double) == 4)` on its own is a number somebody will delete the next time it fails. The same line with the sentence about the 1990 System V i386 psABI beside it is a claim somebody has to argue with.
 
-No horizontal rules. A `---` line is a page break in a document nobody prints.
+An executing test has to produce the same output on every target. If it cannot, it is testing a layout rather than a calling convention, and it belongs in `corpus/layout` where the divergence is written down as a condition rather than in an expected file where it is written down as a number.
 
-No hard wrapping. One sentence continues to the end of the line, however long that is. Wrapped prose produces diffs where a one word edit rewrites a paragraph, which is unreadable in a pull request.
+## Writing
 
-The same rules apply to pull request bodies, issue comments and commit messages, where no tool checks them. Write like a person explaining something to a colleague.
+Plain English, the way a developer writes to another developer. No em dashes and no en dashes: a sentence that wants one wanted a comma, a colon, a period or the word "to". No horizontal rules, because a heading says what the next part is and a rule says only that there is one. No line break in the middle of a sentence, so a paragraph is one line however long it gets. `bin/lint` checks the first two and the third is on you.
 
-## Comments
+This is the same set of rules the compiler repository checks in `cargo xtask style`, so a paragraph can move between the two without being reformatted on arrival.
 
-The rule is that a comment says why, and the code already says what. A comment that restates the line under it is noise, and a comment explaining why a psABI requires something that looks wrong is the most valuable thing in the file.
+## Shell
 
-Where a decision was close, say what the alternative was and why it lost. The next person to read it will have the same idea you had and will spend an afternoon on it otherwise.
+POSIX sh, checked with `shellcheck -s sh`. No bashisms, because one of the hosts is a mac with an old bash and another is git-bash on Windows.
+
+If you find yourself wanting a real language, stop and ask whether the thing you are writing belongs in `tamnd/rucc` instead. That is where the crates are and that is where a program with a build system should go.
 
 ## Pull requests
 
-One reviewable change per pull request. If the body needs the word "also" more than once, it is two pull requests.
-
-Every pull request names the milestone it belongs to, links the tracking issue, and gets the labels for its area and its milestone. When it merges, the tracking issue's checklist gets ticked and a comment goes on the issue saying what landed and what it means for the milestone. That is how the issue stays the truth about progress rather than a list somebody wrote once.
-
-A pull request that changes the target table has to explain the evidence. `spec/04-target-matrix.md` section 4.7 is explicit that a tier is computed from corpus results and never asserted, so raising one in a table edit is the one change that will be sent back without discussion.
-
-## Releases
-
-The version is one number for the whole workspace. A patch release, `v0.x.y`, is cut when enough has landed to be worth a tag. A minor release, `v0.x.0`, is cut when a milestone in `spec/15-plan.md` is finished.
-
-Neither is automatic. The changelog entry is where somebody writes down what the release means, and a release with a generated list of commit subjects instead of that is a release nobody can read.
+One thing per pull request, with the evidence in the body. A change to a facts file is evidence. A change to an assertion is evidence when the compiler output that forced it is quoted beside it.

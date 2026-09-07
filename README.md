@@ -1,67 +1,71 @@
 # rucc-cross
 
-Cross compilation for [rucc](https://github.com/tamnd/rucc): the target model, the ABI descriptions, the libc stubs, the sysroots and the harnesses that test all of it.
+The toolchains, the environment and the C corpus that [rucc](https://github.com/tamnd/rucc) is compared against when it cross compiles. Zig 0.16, gcc, qemu, and the C that tells them apart.
 
-The goal is one sentence. `rucc --target=aarch64-linux-musl main.c -o main` on a Windows laptop with no toolchain installed, no sysroot flag and no second download, producing a static binary that runs on a Raspberry Pi. `zig cc` already does that and carries LLVM to do it. Nothing does it in twenty five megabytes.
+There is no rucc code here. It moved. `rucc-tuple`, `rucc-abi`, the seventeen specification documents and the milestone issues all live in `tamnd/rucc`, in `crates/` and in `spec/cross-compile/`, because a crate the compiler depends on has no business being in a second repository and a version skew between the two is a bug waiting for a bad week. What is left here is the part that genuinely does not belong in a compiler checkout: a gigabyte of downloaded toolchains, an emulator per architecture, and the programs you run under them.
 
-## Why this is a separate repository
+## What it is for
 
-Three reasons, and the first one is the practical one.
+A cross compiler is a claim about a machine you are not standing next to. The only way to check one is to have something else compile the same source for the same machine and see whether the two agree, and then to run both and see whether they agree about that too. This repository is the something else.
 
-Testing a cross compiler means QEMU, foreign sysroots, downloaded SDKs, emulated hosts and CI jobs that take an hour. None of that belongs in the gate that has to stay under twenty minutes on every commit to the compiler. The compiler repository keeps its per-commit CI; this repository is where the slow and wide matrix lives.
+Three things, and they are separable.
 
-The second is that the code here is genuinely separable. The target tuple, the ABI descriptions and the stub generator are libraries with no dependency on the compiler's internals, so they can be built and tested on their own, and the compiler picks them up as ordinary crates when each one is ready.
+**The toolchains.** `toolchains/manifest` pins what we compare against, with a hash. `toolchains/install zig` fetches it and refuses anything whose hash does not match. Nothing is fetched from a URL that is not on a line somebody reviewed.
 
-The third is licensing. A compiler repository that vendors glibc headers is a compiler repository nobody can read the license of. The same argument that put the compatibility corpora in [rucc-compat](https://github.com/tamnd/rucc-compat) puts the sysroot machinery here.
+**The environment.** `targets` says how each of rucc's forty two targets is spelled to zig, to gcc, and to qemu. Every entry in the zig column was checked by running the compiler rather than read out of a manual, and the dashes are the ones that failed.
 
-## The specification
+**The corpus.** `corpus/layout` is C that any correct compiler for a target must accept, written as assertions with the reason beside them. `corpus/abi` is C that has to produce the same output on every target, so a target that produces different output has miscounted a register rather than laid something out differently. `corpus/exec` is the smallest thing that proves a sysroot and a link line work at all.
 
-`spec/` carries seventeen documents. Start with `spec/02-the-goal.md` for the five claims and how each one is falsified, then `spec/04-target-matrix.md` for the target list and the entry price for each tier. `spec/15-plan.md` has the milestone map and the cost.
+## Using it
 
-References of the form "parent document 12" point at `spec/` in the compiler repository. References of the form "document 06" point inside this one.
+```
+toolchains/install zig          fetch the pinned reference compiler
+bin/facts --all                 what the reference says about every target's scalar types
+bin/facts --check               fail if anything in facts/ has drifted
+bin/compile-corpus              compile the layout corpus for all forty two targets
+bin/run-corpus                  build and run the executing corpus under qemu
+bin/lint                        the house rules
+```
 
-## The claims
+Set `RUCC_CROSS_REFERENCE=gcc` to compare against the platform's cross gcc instead of zig, for the rows where one exists. That column is much sparser than the zig one and the sparseness is the argument for this whole line of work: a per target gcc has to exist as a package before you can compare against it, and for most of the table nobody has built one.
 
-Five, each decided by a number or by the exit status of a command.
+The download cache is `$RUCC_CROSS_CACHE`, which defaults to `~/.cache/rucc-cross`. It is outside the checkout on purpose, so switching branches does not throw away a gigabyte.
 
-1. For every target triple `zig cc` will compile and link a hosted C program for, rucc does the same, from every host zig runs on, out of one binary, with no external toolchain.
-2. The code quality and compile throughput numbers of the compiler do not regress by more than two percent as a result of any change made for this work.
-3. Bringing up target N takes fewer engineer days than target N minus one for every N of four or more, and the per target line count outside the target crate and the target's rule set is zero.
-4. No target is listed as supported until rung 0 and rung 1 of the target ladder pass on it, and the report says whether that was on hardware or under emulation.
-5. Two invocations for the same target and the same input on different hosts produce byte identical output, and every input that is not ours is named with its source, its hash and its licence.
+## What it has found so far
 
-Claim 2 is the one that can end the project. It is stated second rather than last for that reason, and `spec/02-the-goal.md` section 2.7 writes down what happens if it fails.
+The corpus earns its keep by being wrong in public. Five things, each of which was a plausible belief before the reference rejected it.
+
+**Plain `char` is unsigned on s390x.** It was written down as signed, in with x86. The s390x ELF ABI says unsigned, and clang agrees, and the target had never been compiled for.
+
+**mingw-w64 has an eighty bit `long double` and MSVC does not.** The rule was keyed on the operating system, so `x86_64-windows-gnu` got the eight byte answer that only `x86_64-windows-msvc` deserves. Two targets, one OS, different types.
+
+**Windows on i386 aligns a `double` to eight and System V aligns it to four.** `__i386__` is not the condition. `__i386__ && !_WIN32` is. A struct of an int and a double is twelve bytes under one and sixteen under the other.
+
+**s390x caps scalar alignment at eight.** An IEEE quad `long double` is sixteen bytes and aligned to eight there, and `__int128` is the same. It is the one target in the table where the size and the alignment of a scalar come apart in that direction.
+
+**`__int128` is not a 64-bit only type.** wasm32 has it and so does `x86_64-linux-gnux32`, both with four byte pointers, which is a useful reminder that the pointer width and the widest integer are separate facts.
+
+The first two were bugs in `rucc-tuple` and `rucc-abi` and are fixed. The last three were bugs in this corpus, and the comments in `corpus/layout/scalars.c` say so where they happened.
 
 ## Layout
 
 ```
-crates/rucc-tuple    the target tuple, the target table and the tier model
-crates/rucc-cross    the command line tool, which is mostly print queries for now
-spec                 the seventeen documents
-docs                 generated, and TARGETS.md is the target table as published
-xtask                the house rules: prose style, and the checks CI runs
+targets              how each rucc target is spelled to each tool, and what runs a binary for it
+toolchains/manifest  what we compare against, pinned with a hash
+toolchains/install   fetch and verify
+bin/                 the drivers, all POSIX sh
+corpus/layout        C that has to compile, with the reason for each assertion beside it
+corpus/abi           C that has to produce the same output everywhere
+corpus/exec          the smallest thing that proves a sysroot works
+facts/               what the reference says about each target, recorded and checked in CI
 ```
 
-More crates arrive with the milestones they belong to. `spec/15-plan.md` says which.
+Everything is POSIX sh. There is no build system and no dependency file, and that is deliberate: the day this repository needs a language with a build system is the day somebody should ask whether the thing being built belongs in `tamnd/rucc` instead.
 
-`CONTRIBUTING.md` has the gate you can run locally, the prose rules and what a pull request is expected to carry.
+## Where the design is written down
 
-## Building
-
-```
-cargo build --workspace
-cargo test --workspace
-cargo run -p rucc-cross -- targets
-```
-
-The toolchain is pinned to Rust 1.98.0 in `rust-toolchain.toml`. The floor that CI checks separately is 1.85.0, because a tool people cannot install on the machine where they need it is a tool they do not use.
-
-## Status
-
-M0 is the target model. Everything after it is in the milestone list, and each milestone has a tracking issue whose checklist is the truth about what is done.
-
-Nothing here is stable. The crates are published so that the compiler can depend on them by version rather than by path, and their Rust APIs will change without a major version bump until the target list stops moving.
+`spec/cross-compile/` in the compiler repository, starting at [`00-README.md`](https://github.com/tamnd/rucc/blob/main/spec/cross-compile/00-README.md). Section 14 is the testing document and it is the one this repository implements. The tracking issue is [tamnd/rucc#618](https://github.com/tamnd/rucc/issues/618).
 
 ## Licence
 
-Apache-2.0. See `LICENSE-APACHE`.
+Apache-2.0. See `LICENSE-APACHE`. The corpus is ours. Nothing from a toolchain is vendored here, only fetched, and `toolchains/manifest` names the source of every byte.

@@ -1,26 +1,12 @@
-# The dependency list here is meant to stay short enough that a human can audit it, so weekly is
-# often enough and grouping the patch bumps into one pull request keeps the noise down without
-# hiding a major bump.
+# There is no dependency file in this repository and there is not meant to be one. Everything the
+# corpus needs is either in the pinned manifest, which moves by hand through
+# `toolchains/record-hash`, or comes from the platform's package manager.
+#
+# So the only thing here is the actions, which are pinned to a patch version on purpose and
+# therefore need something to move them.
 
 version: 2
 updates:
-  - package-ecosystem: cargo
-    directory: /
-    schedule:
-      interval: weekly
-      day: monday
-      time: "06:00"
-    open-pull-requests-limit: 5
-    commit-message:
-      prefix: "deps"
-    groups:
-      patch:
-        update-types: ["patch"]
-      minor:
-        update-types: ["minor"]
-
-  # Actions are pinned to a patch version on purpose, which means they need something to move
-  # them. This is that something.
   - package-ecosystem: github-actions
     directory: /
     schedule:

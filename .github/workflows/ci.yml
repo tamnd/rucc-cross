@@ -1,13 +1,12 @@
-# The per-commit gate. Everything here is required to merge.
+# The per-commit gate.
 #
-# This repository exists so that the slow half of cross-compilation testing does not sit in the
-# compiler's gate, which is the argument in README.md. That argument only works if this file
-# stays fast too. Qemu, foreign sysroots, fetched SDKs and emulated hosts belong in nightly.yml,
-# and the rule for deciding is the wall-clock one: a job that cannot finish inside the twenty
-# minutes a reviewer will wait is a nightly job.
+# Everything here runs against the pinned reference toolchain and nothing here builds rucc. That
+# separation is the point of the repository: a change to the corpus or to the target table is
+# checked against zig, gcc and qemu, and a change to the compiler is checked in the compiler's own
+# repository, and neither one waits for the other.
 #
-# Actions are pinned to a patch version rather than a major tag. A major tag is a moving
-# reference, and a project that cannot reproduce its own CI run has given up something it needs.
+# Actions are pinned to a patch version rather than a major tag. A major tag is a moving reference,
+# and a project that cannot reproduce its own CI run has given up something it needs.
 
 name: ci
 
@@ -17,8 +16,6 @@ on:
   pull_request:
   merge_group:
 
-# A force-push should cancel the run it replaced. The default branch is exempt, because a
-# main-branch run is what the badge and the bisect history read from.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -26,179 +23,79 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-  RUSTFLAGS: -D warnings
-  RUSTDOCFLAGS: -D warnings
-
 jobs:
-  # Cheapest checks first, so a formatting mistake costs seconds rather than a full matrix.
-  quick:
-    name: format, lints and house rules
+  # Cheapest first, so a trailing tab costs seconds rather than a toolchain download.
+  lint:
+    name: house rules
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
-      - name: cargo fmt
-        run: cargo fmt --all --check
-      # Same three prose rules as the compiler repository, so that a paragraph can move between
-      # the two without being reformatted.
-      - name: prose style
-        run: cargo xtask style
-      # spec/04-target-matrix.md section 4.7 says the published target table is generated from
-      # the one the code reads. This is the check that keeps the two from drifting.
-      - name: the target table is generated
-        run: cargo xtask targets --check
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features
+      - name: shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck
+      - name: bin/lint
+        run: ./bin/lint
 
-  test:
-    name: test on ${{ matrix.name }}
-    needs: quick
+  # The layout corpus for every one of the forty two targets, and the recorded facts for each of
+  # them. Neither needs an emulator, so this is the job that says something about the whole table
+  # rather than about the rows with a machine behind them.
+  layout:
+    name: layout and facts on ${{ matrix.name }}
+    needs: lint
     runs-on: ${{ matrix.os }}
-    # Runner images are named explicitly rather than through `-latest`, so that an image
-    # rollout shows up as a commit rather than as yesterday's green run turning red. The policy
-    # is the newest generally available image per host.
-    #
-    # The aarch64 Linux row is not here for coverage of the code, which is host independent. It
-    # is here because spec/04-target-matrix.md section 4.4 says the host end of a cross compiler
-    # is where nobody looks, and a second host architecture is the cheapest way to find out that
-    # something reads the machine it is running on.
+    # Two hosts, because a cross compiler has two ends and the host end is where nobody looks. The
+    # facts a target reports must not depend on the machine that asked, and this is where a
+    # host-dependent answer would show up as a diff.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: linux x86-64, debug
+          - name: linux x86-64
             os: ubuntu-24.04
-            profile: dev
-          - name: linux x86-64, release
-            os: ubuntu-24.04
-            profile: release
-          - name: linux aarch64
-            os: ubuntu-24.04-arm
-            profile: dev
           - name: macos arm64
             os: macos-26
-            profile: dev
-          - name: windows x86-64
-            os: windows-2025
-            profile: dev
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
+      - name: cache the toolchains
+        uses: actions/cache@v4.3.0
         with:
-          key: ${{ matrix.profile }}
-      - name: cargo build
-        run: cargo build --workspace --all-features --profile ${{ matrix.profile }}
-      - name: cargo test
-        run: cargo test --workspace --all-features --profile ${{ matrix.profile }}
-      # The tier 4 promise from spec/04-target-matrix.md section 4.2 is that a target nothing is
-      # emitted for still answers correctly, and the answer has to be the same on every host.
-      # This is where a host-dependent default would show up.
-      - name: the target queries answer the same on every host
-        shell: bash
-        run: |
-          set -euo pipefail
-          dir=${{ matrix.profile == 'dev' && 'debug' || 'release' }}
-          exe=""
-          if [ "$RUNNER_OS" = "Windows" ]; then exe=".exe"; fi
-          cross="./target/$dir/rucc-cross$exe"
-          "$cross" --version
-          "$cross" targets
-          "$cross" info aarch64-linux-musl
-          test "$("$cross" canonical x86_64-unknown-linux-gnu)" = "x86_64-linux-gnu"
-          test "$("$cross" canonical aarch64-apple-darwin23)" = "aarch64-macos.14"
-          test "$("$cross" llvm-triple x86_64-windows-msvc)" = "x86_64-pc-windows-msvc"
+          path: ~/.cache/rucc-cross
+          key: toolchains-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest') }}
+      - name: install zig
+        run: ./toolchains/install zig
+      - name: the recorded facts still match the reference
+        run: ./bin/facts --check
+      - name: the layout corpus compiles for every target
+        run: ./bin/compile-corpus
 
-  docs:
-    name: documentation
-    needs: quick
+  # The executing corpus, under qemu user mode for everything that is not this machine. Every line
+  # of the output says whether it ran on hardware or under an emulator, because
+  # spec/cross-compile/14-testing.md section 14.6 says a failure seen only under emulation leaves
+  # the emulator a suspect and a result that does not say which cannot be read that way.
+  execute:
+    name: run the corpus under qemu
+    needs: lint
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
-      # Every crate here is published so that the compiler can depend on it by version rather
-      # than by path, so every crate's documentation has to build. A broken intra-doc link is a
-      # broken link on docs.rs.
-      - name: cargo doc
-        run: cargo doc --workspace --all-features --no-deps
-
-  msrv:
-    name: minimum supported rust version
-    needs: quick
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: read the floor from Cargo.toml
-        id: msrv
-        run: |
-          set -euo pipefail
-          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-      - name: install
-        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal
-      - uses: Swatinem/rust-cache@v2.9.2
+      - name: cache the toolchains
+        uses: actions/cache@v4.3.0
         with:
-          key: msrv
-      # The toolchain file pins 1.98 so that a clippy release cannot turn a green run red
-      # overnight, and the floor is a separate and lower number so that a tool people cannot
-      # install on the machine where they need it does not become a tool they do not use. The
-      # floor is raised deliberately, in a commit, not by accident in a dependency bump.
-      - name: cargo check
-        run: cargo +${{ steps.msrv.outputs.version }} check --workspace --all-features
-
-  determinism:
-    name: reproducible output
-    needs: quick
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: Swatinem/rust-cache@v2.9.2
-      # spec/02-the-goal.md claim 5 makes byte-identical output a requirement, and there is no
-      # generated output to compare yet. Checking that the tool itself builds twice to the same
-      # bytes is the same property one level down, and it catches the hash-order and timestamp
-      # mistakes while they are still cheap to fix.
-      - name: build twice and compare
+          path: ~/.cache/rucc-cross
+          key: toolchains-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest') }}
+      - name: install zig and qemu
         run: |
-          set -euo pipefail
-          cargo build --release --bin rucc-cross
-          sha256sum target/release/rucc-cross > first.sha256
-          rm -rf target/release/rucc-cross target/release/.fingerprint
-          cargo build --release --bin rucc-cross
-          sha256sum target/release/rucc-cross > second.sha256
-          diff <(cut -d' ' -f1 first.sha256) <(cut -d' ' -f1 second.sha256)
-          echo "the tool builds reproducibly"
-
-  audit:
-    name: supply chain
-    needs: quick
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cargo-deny
-      - name: cargo deny
-        run: cargo deny --all-features check
-      # This repository will eventually download sysroots and unpack archives, which is exactly
-      # the kind of work that arrives with a dependency tree. The count is printed on every
-      # commit so that growth is something somebody decided rather than something that happened.
-      - name: report the dependency count
-        run: |
-          set -euo pipefail
-          count() {
-            cargo tree "$@" --edges normal --prefix none --all-features \
-              | sed 's/ (\*)$//' | sort -u | grep -c . || true
-          }
-          echo "the workspace: $(count --workspace) crates including transitives"
-          echo "Everything outside the workspace is listed in the root Cargo.toml, and the list is currently empty."
+          ./toolchains/install zig
+          ./toolchains/install qemu
+      - name: record which qemu this was
+        run: qemu-x86_64 --version
+      - name: build and run
+        run: ./bin/run-corpus
 
   # A single required check, so branch protection does not have to list every job above.
   ci:
     name: ci
     if: always()
-    needs: [quick, test, docs, msrv, determinism, audit]
+    needs: [lint, layout, execute]
     runs-on: ubuntu-24.04
     steps:
       - name: fail if anything upstream failed

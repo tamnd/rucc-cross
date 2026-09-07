@@ -1,0 +1,32 @@
+# The toolchains this repository compares rucc against, pinned.
+#
+# One record per line, tab separated, in this order:
+#
+#   tool  version  host  sha256  url
+#
+# The host is the machine the toolchain runs on, spelled the way the tool spells it. Nothing here
+# is fetched without a hash, and nothing here is fetched from a URL that is not on this line, so a
+# new toolchain is a commit somebody reviewed rather than a download that happened.
+#
+# `toolchains/install <tool>` reads this. `toolchains/record-hash <url>` downloads once and prints
+# the line to paste, which is how an entry gets added without anyone typing a hash from memory.
+#
+# The zig hashes are the ones published in https://ziglang.org/download/index.json for 0.16.0,
+# released 13 April 2026. That release is the one spec/cross-compile/01-research-2026.md in the
+# compiler repository was written against, so it is the version the parity claim is measured on
+# until somebody moves it deliberately.
+#
+# Two toolchains are deliberately absent and the reason is the same for both. GCC 16 cross
+# compilers and qemu are installed from the platform's package manager by `toolchains/install`,
+# because upstream ships neither as a hash pinned binary for every host we run on, and building
+# either from source in CI costs more than the reproducibility buys. What we do instead is record
+# the version that was actually used in every facts file, so a result that changes because the
+# toolchain changed is visible rather than mysterious. Pinned tarballs for both are wanted, and
+# the way in is `toolchains/record-hash`.
+
+zig	0.16.0	x86_64-linux	70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00	https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+zig	0.16.0	aarch64-linux	ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17	https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
+zig	0.16.0	x86_64-macos	0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7	https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz
+zig	0.16.0	aarch64-macos	b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489	https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
+zig	0.16.0	x86_64-windows	68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e	https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
+zig	0.16.0	aarch64-windows	aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef	https://ziglang.org/download/0.16.0/zig-aarch64-windows-0.16.0.zip

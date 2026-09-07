@@ -1,0 +1,131 @@
+#!/bin/sh
+# Fetch a pinned toolchain into the cache, verify it against the manifest, and unpack it.
+#
+# usage: toolchains/install <tool>...
+#
+# Tools: zig, qemu, gcc-cross. The first is a hash pinned tarball from toolchains/manifest and the
+# other two come from the platform's package manager, for the reason written at the top of that
+# file. Running this twice is cheap, because a toolchain that is already unpacked is left alone.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. It is outside the
+# checkout on purpose, so that switching branches does not throw away a gigabyte of downloads.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+manifest=$here/toolchains/manifest
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "install: $*"; exit 1; }
+
+# The host, spelled the way the manifest spells it, which is the way zig spells it.
+host() {
+	machine=$(uname -m)
+	case $machine in
+	x86_64 | amd64) arch=x86_64 ;;
+	aarch64 | arm64) arch=aarch64 ;;
+	*) die "no pinned toolchain for a $machine host" ;;
+	esac
+	case $(uname -s) in
+	Linux) printf '%s-linux\n' "$arch" ;;
+	Darwin) printf '%s-macos\n' "$arch" ;;
+	MINGW* | MSYS* | CYGWIN*) printf '%s-windows\n' "$arch" ;;
+	*) die "no pinned toolchain for a $(uname -s) host" ;;
+	esac
+}
+
+# The sha256 of a file, from whichever of the two spellings this machine has.
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+install_pinned() {
+	tool=$1
+	line=$(awk -v t="$tool" -v h="$(host)" '$1 == t && $3 == h' "$manifest")
+	[ -n "$line" ] || die "$tool has no entry for $(host) in toolchains/manifest"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/$tool-$version
+
+	if [ -d "$into" ]; then
+		say "$tool $version is already unpacked in $into"
+		return 0
+	fi
+
+	mkdir -p "$cache"
+	archive=$cache/$(basename "$url")
+	if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+		say "fetching $url"
+		curl -fsSL --retry 3 -o "$archive.part" "$url"
+		mv "$archive.part" "$archive"
+	fi
+
+	got=$(sha256 "$archive")
+	if [ "$got" != "$want" ]; then
+		rm -f "$archive"
+		die "$(basename "$url") hashed to $got and the manifest says $want"
+	fi
+
+	# Unpacked beside the archive and then moved, so that an interrupted unpack does not leave a
+	# directory that the check above would take for a finished one.
+	rm -rf "$into.part"
+	mkdir -p "$into.part"
+	case $url in
+	*.tar.xz) tar -xJf "$archive" -C "$into.part" --strip-components=1 ;;
+	*.tar.bz2) tar -xjf "$archive" -C "$into.part" --strip-components=1 ;;
+	*.zip)
+		unzip -q "$archive" -d "$into.part"
+		inner=$(find "$into.part" -mindepth 1 -maxdepth 1 -type d)
+		mv "$inner"/* "$into.part/"
+		rmdir "$inner"
+		;;
+	*) die "no idea how to unpack $(basename "$url")" ;;
+	esac
+	mv "$into.part" "$into"
+	say "$tool $version is in $into"
+}
+
+# The package manager for this machine, and the packages each tool needs from it. Named per
+# manager rather than per distribution, because what breaks is the command and not the logo.
+install_packaged() {
+	tool=$1
+	case $tool in
+	qemu) apt="qemu-user qemu-user-static" ; brew="qemu" ;;
+	gcc-cross)
+		apt="gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu gcc-powerpc64le-linux-gnu gcc-s390x-linux-gnu gcc-arm-linux-gnueabihf gcc-mingw-w64-x86-64"
+		brew=""
+		;;
+	*) die "unknown tool $tool" ;;
+	esac
+
+	if command -v apt-get >/dev/null 2>&1; then
+		say "installing $apt with apt-get"
+		sudo apt-get update -qq
+		# shellcheck disable=SC2086
+		sudo apt-get install -y --no-install-recommends $apt
+	elif command -v brew >/dev/null 2>&1; then
+		[ -n "$brew" ] || die "$tool is a Linux only toolchain and this is a mac"
+		say "installing $brew with brew"
+		# shellcheck disable=SC2086
+		brew install $brew
+	else
+		die "no apt-get and no brew, so $tool has to go in by hand"
+	fi
+}
+
+[ $# -gt 0 ] || die "usage: toolchains/install <tool>..."
+
+for tool in "$@"; do
+	case $tool in
+	zig) install_pinned zig ;;
+	qemu | gcc-cross) install_packaged "$tool" ;;
+	*) die "unknown tool $tool, and toolchains/manifest lists what there is" ;;
+	esac
+done
