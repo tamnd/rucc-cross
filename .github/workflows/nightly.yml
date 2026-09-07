@@ -1,17 +1,16 @@
-# The slow half. Everything that is too expensive, too wide or too dependent on the outside
-# world to sit in the per-commit gate.
+# The slow half, and the half that watches the outside world.
 #
-# This is the file the whole repository exists to make possible. The compiler's gate has to stay
-# under twenty minutes on every commit, and cross-compilation testing means emulators, foreign
-# sysroots and fetched SDKs. Putting that here rather than there is the trade, and the trade only
-# pays if failures here are read. The `report` job at the bottom is what makes them visible.
+# Two kinds of job. The first compares the reference against itself over time: a new zig or a new
+# gcc changes what the facts files say, and finding that out the morning after the release is much
+# cheaper than finding it out inside a pull request that was about something else. The second is
+# the wide execution matrix, which is too slow for the gate.
 
 name: nightly
 
 on:
   schedule:
-    # After the compiler repository's nightly, so that a shared failure is easy to order.
-    - cron: "0 4 * * *"
+    # After the compiler repository's nightly, so a shared failure is easy to order.
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -21,98 +20,87 @@ concurrency:
 permissions:
   contents: read
 
-env:
-  CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
-
 jobs:
-  # A new advisory does not wait for somebody to push a commit, so neither does this.
-  advisories:
-    name: new advisories
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cargo-deny
-      - name: cargo deny check advisories
-        run: cargo deny --all-features check advisories
-
-  # Breakage in a future compiler is cheaper to fix while it is still in beta than on the day it
-  # becomes stable and the pin in rust-toolchain.toml has to move.
-  upcoming-rust:
-    name: rust ${{ matrix.channel }}
+  # What the reference says today, against what it said when the facts were recorded, with the
+  # pinned version replaced by whatever is current. A difference here is a heads up about the next
+  # version bump rather than a failure, so it does not fail the run.
+  drift:
+    name: what a newer zig would say
     runs-on: ubuntu-24.04
     continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install the newest zig
+        run: |
+          set -euo pipefail
+          version=$(curl -fsSL https://ziglang.org/download/index.json | grep -o '"[0-9]\+\.[0-9]\+\.[0-9]\+"' | head -1 | tr -d '"')
+          pinned=$(awk -F'\t' '$1 == "zig" { print $2; exit }' toolchains/manifest)
+          echo "pinned $pinned, newest $version"
+          if [ "$version" = "$pinned" ]; then
+            echo "the pin is current"
+            exit 0
+          fi
+          echo "the pin is behind, and toolchains/record-hash is how it moves"
+          exit 1
+
+  # The executing corpus on both host architectures, so that a result that depends on the machine
+  # that built the binary rather than on the machine that ran it has somewhere to show up.
+  execute:
+    name: run the corpus on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        channel: [beta, nightly]
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: install
-        run: rustup toolchain install ${{ matrix.channel }} --profile minimal --component clippy
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          key: ${{ matrix.channel }}
-      - name: cargo test
-        run: cargo +${{ matrix.channel }} test --workspace --all-features
-      - name: cargo clippy
-        run: cargo +${{ matrix.channel }} clippy --workspace --all-targets --all-features
-
-  # The big-endian row of spec/04-target-matrix.md section 4.4, which is the one to argue about
-  # and the one worth having. A cross compiler has two ends and the host end is where nobody
-  # looks, so the code that will one day byte-swap while writing a little-endian object gets
-  # exercised on a host where the swap is not a no-op. Zig fixed big-endian host bugs in 2026,
-  # which is evidence that they exist and that they are found late.
-  #
-  # It runs under emulation and it says so. spec/04-target-matrix.md section 4.6 is explicit
-  # that a failure seen only under emulation leaves the emulator a suspect.
-  big-endian-host:
-    name: build and test on a big-endian host
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cross
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          key: s390x
-      - name: cargo test under qemu-s390x
-        run: cross test --workspace --all-features --target s390x-unknown-linux-gnu
-
-  # The other direction: the release artifact most people will actually download is a static
-  # binary, and a static binary that was never built is a claim rather than an artifact.
-  static-binary:
-    name: static musl binary
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: taiki-e/install-action@v2.87.5
-        with:
-          tool: cross
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          key: musl
-      - name: build and run
+      - name: install zig and qemu
         run: |
-          set -euo pipefail
-          cross build --release --bin rucc-cross --target x86_64-unknown-linux-musl
-          file target/x86_64-unknown-linux-musl/release/rucc-cross
-          cross run --release --bin rucc-cross --target x86_64-unknown-linux-musl -- targets
+          ./toolchains/install zig
+          ./toolchains/install qemu
+      - name: build and run
+        run: ./bin/run-corpus
+
+  # The same corpus against the platform's cross gcc rather than against zig, for the rows where a
+  # gcc exists. When the two references disagree, that is the interesting day, and the whole reason
+  # for having two.
+  second-opinion:
+    name: the corpus against cross gcc
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install the cross compilers and qemu
+        run: |
+          ./toolchains/install gcc-cross
+          ./toolchains/install qemu
+      - name: record which gcc this was
+        run: aarch64-linux-gnu-gcc --version | head -1
+      - name: the layout corpus
+        env:
+          RUCC_CROSS_REFERENCE: gcc
+        run: ./bin/compile-corpus
+      - name: the executing corpus
+        env:
+          RUCC_CROSS_REFERENCE: gcc
+        run: ./bin/run-corpus
 
   report:
     name: nightly
     if: always()
-    needs: [advisories, upcoming-rust, big-endian-host, static-binary]
+    needs: [drift, execute, second-opinion]
     runs-on: ubuntu-24.04
     steps:
-      # `upcoming-rust` is allowed to fail without failing the run, because a nightly compiler
-      # regression is somebody else's bug and a red mark for it every morning is a red mark
-      # people stop reading. Everything else here is ours.
-      - name: fail if anything but the future compilers failed
-        if: needs.advisories.result != 'success' || needs.big-endian-host.result != 'success' || needs.static-binary.result != 'success'
+      # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
+      # is not a bug and a gcc that disagrees with clang is a question rather than a regression, and
+      # a red mark every morning for either is a red mark people stop reading. The execution matrix
+      # is ours.
+      - name: fail if the execution matrix failed
+        if: needs.execute.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"

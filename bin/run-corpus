@@ -1,0 +1,109 @@
+#!/bin/sh
+# Compile the executing corpus for a target, run it, and compare the output against the expected
+# transcript.
+#
+# usage: bin/run-corpus [tuple]...
+#
+# With no arguments it does every row of the targets table that has a runner, which is the Linux
+# rows, because qemu user mode runs Linux binaries and a Mach-O or a PE needs a different answer.
+# Whether the binary ran on hardware or under an emulator is recorded on every line, because
+# spec/cross-compile/14-testing.md section 14.6 says a failure seen only under emulation leaves the
+# emulator a suspect and a result that does not say which it was cannot be read that way.
+#
+# The expected transcript is the same file for every target. That is the whole design: the corpus
+# prints values rather than sizes, so a target that prints something different has miscounted a
+# register or a stack slot. A per target expected file would turn a bug into a recorded fact.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+die() { printf 'run-corpus: %s\n' "$*" >&2; exit 1; }
+
+if [ $# -gt 0 ]; then
+	tuples=$*
+else
+	tuples=$(awk -F'\t' '/^[^#]/ && NF > 1 && $4 != "-" { print $1 }' "$here/targets")
+fi
+
+# The tuple this machine is, so that a target matching it runs directly rather than under qemu.
+machine=$(uname -m)
+case $machine in
+x86_64 | amd64) machine=x86_64 ;;
+aarch64 | arm64) machine=aarch64 ;;
+*) machine=unknown ;;
+esac
+case $(uname -s) in
+Linux) native=$machine-linux-gnu ;;
+Darwin) native=$machine-macos ;;
+*) native=$machine-unknown ;;
+esac
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT INT TERM
+
+passed=0
+failed=0
+skipped=0
+
+for tuple in $tuples; do
+	runner=$(awk -F'\t' -v t="$tuple" '$1 == t { print $4 }' "$here/targets")
+	[ -n "$runner" ] || die "$tuple is not a row of the targets table"
+
+	how=emulated
+	if [ "$tuple" = "$native" ]; then
+		runner=""
+		how=hardware
+	elif [ "$runner" = "-" ] || ! command -v "$runner" >/dev/null 2>&1; then
+		printf '%-24s skipped, no %s on this machine\n' "$tuple" "${runner:--}"
+		skipped=$((skipped + 1))
+		continue
+	fi
+
+	# Static where it is possible, because a statically linked binary is one fewer thing that
+	# can be wrong about a cross build and qemu user mode needs no interpreter path for it.
+	# Darwin refuses outright: there is no static libSystem and there has not been one since
+	# 10.6, so the Darwin rows link dynamically and run on the machine they were built on.
+	link=-static
+	case $tuple in
+	*-macos | *-ios*) link="" ;;
+	esac
+
+	for level in -O0 -O2; do
+		for source in "$here"/corpus/abi/*.c "$here"/corpus/exec/*.c; do
+			name=$(basename "$source" .c)
+			expected=$(dirname "$source")/$name.expected
+			[ -f "$expected" ] || die "$source has no expected transcript beside it"
+
+			binary=$out/$name
+			# shellcheck disable=SC2086
+			if ! "$here/bin/reference-cc" "$tuple" -std=c17 -Wall -Wextra -Werror \
+				"$level" $link -o "$binary" "$source" 2>"$out/build.log"; then
+				printf '%-24s %-12s %-4s did not build\n' "$tuple" "$name" "$level"
+				sed 's/^/    /' "$out/build.log" >&2
+				failed=$((failed + 1))
+				continue
+			fi
+
+			# shellcheck disable=SC2086
+			if ! $runner "$binary" >"$out/got" 2>&1; then
+				printf '%-24s %-12s %-4s exited nonzero, %s\n' "$tuple" "$name" "$level" "$how"
+				sed 's/^/    /' "$out/got" >&2
+				failed=$((failed + 1))
+				continue
+			fi
+
+			if diff -u "$expected" "$out/got" >"$out/diff"; then
+				printf '%-24s %-12s %-4s ok, %s\n' "$tuple" "$name" "$level" "$how"
+				passed=$((passed + 1))
+			else
+				printf '%-24s %-12s %-4s wrong output, %s\n' "$tuple" "$name" "$level" "$how"
+				sed 's/^/    /' "$out/diff" >&2
+				failed=$((failed + 1))
+			fi
+		done
+	done
+done
+
+printf 'corpus: %d ran, %d failed, %d skipped\n' "$passed" "$failed" "$skipped" >&2
+[ "$failed" -eq 0 ]

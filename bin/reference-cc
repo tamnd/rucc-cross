@@ -1,0 +1,47 @@
+#!/bin/sh
+# Run the reference C compiler for a rucc target.
+#
+# usage: bin/reference-cc <tuple> [argument]...
+#
+# The reference is zig cc by default, because it is the only toolchain that can be told to target
+# every row of the table without a second installation, which is the property this whole line of
+# work is trying to reproduce. Set RUCC_CROSS_REFERENCE=gcc to use the platform's cross gcc
+# instead, for the rows where one exists, which is the comparison that matters when the two
+# disagree and somebody has to decide which is right.
+#
+# Nothing here knows what rucc does. This side of the comparison is deliberately independent, so
+# that a bug in rucc's target table cannot quietly become the expected answer.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+
+die() { printf 'reference-cc: %s\n' "$*" >&2; exit 1; }
+
+[ $# -ge 1 ] || die "usage: bin/reference-cc <tuple> [argument]..."
+tuple=$1
+shift
+
+row=$(awk -F'\t' -v t="$tuple" '$1 == t' "$here/targets")
+[ -n "$row" ] || die "$tuple is not a row of the targets table"
+
+case ${RUCC_CROSS_REFERENCE:-zig} in
+zig)
+	spelling=$(printf '%s' "$row" | cut -f2)
+	[ "$spelling" != "-" ] || die "zig has no spelling for $tuple, and the targets table says why"
+	version=$(awk -F'\t' '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	zig=$cache/zig-$version/zig
+	[ -x "$zig" ] || die "zig $version is not installed, so run toolchains/install zig"
+	exec "$zig" cc -target "$spelling" "$@"
+	;;
+gcc)
+	prefix=$(printf '%s' "$row" | cut -f3)
+	[ "$prefix" != "-" ] || die "no cross gcc exists for $tuple, and the targets table says so"
+	command -v "$prefix-gcc" >/dev/null 2>&1 || die "$prefix-gcc is not on the path, so run toolchains/install gcc-cross"
+	exec "$prefix-gcc" "$@"
+	;;
+*)
+	die "RUCC_CROSS_REFERENCE is ${RUCC_CROSS_REFERENCE}, and it has to be zig or gcc"
+	;;
+esac

@@ -1,0 +1,87 @@
+#!/bin/sh
+# The house rules, in one command.
+#
+# usage: bin/lint
+#
+# Three prose rules and one shell rule. The prose rules are the same two the compiler repository
+# checks in `cargo xtask style`, plus one for the trailing whitespace that a table of tab separated
+# records invites, so that a paragraph can move between the two repositories without being
+# reformatted on arrival.
+#
+# The shell rule is shellcheck, if it is installed. Everything here is POSIX sh on purpose: this
+# repository is an environment and a corpus rather than a program, and the day it needs a language
+# with a build system is the day somebody should ask whether the thing being built belongs in the
+# compiler repository instead.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$here"
+
+problems=0
+report() {
+	printf '%s\n' "$1" >&2
+	problems=$((problems + 1))
+}
+
+markdown=$(find . -name '*.md' -not -path './.git/*' | sort)
+scripts="bin/compile-corpus bin/facts bin/lint bin/reference-cc bin/run-corpus toolchains/install toolchains/record-hash"
+
+# An em dash or an en dash. The rule is that a sentence which needs one is a sentence that wanted a
+# comma, a colon, a period or the word "to", and picking one of those is the author's job.
+for file in $markdown; do
+	if grep -n '[—–]' "$file" >/dev/null 2>&1; then
+		grep -n '[—–]' "$file" | while IFS= read -r hit; do
+			printf '%s:%s: em or en dash\n' "$file" "$hit" >&2
+		done
+		report "$file has an em or en dash"
+	fi
+done
+
+# A horizontal rule, which is a page break wearing a costume. A heading says what the next part is
+# and a rule says only that there is one.
+for file in $markdown; do
+	if awk 'NR > 1 && $0 == "---" { exit 0 } END { exit 1 }' "$file"; then
+		report "$file has a horizontal rule, and a heading would say what the next part is"
+	fi
+done
+
+# Trailing whitespace, which matters more here than usual because the two data files are tab
+# separated and a stray tab at the end of a record is an empty field nobody can see.
+for file in $markdown targets toolchains/manifest $scripts; do
+	if grep -n '[ 	]$' "$file" >/dev/null 2>&1; then
+		report "$file has trailing whitespace"
+	fi
+done
+
+# Every record in the two data files has the number of fields its header promises.
+if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 4 { print FILENAME ":" NR ": " NF " fields, want 4"; bad = 1 } END { exit bad ? 1 : 0 }' targets; then
+	:
+else
+	report "targets has a record with the wrong number of fields"
+fi
+if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 5 { print FILENAME ":" NR ": " NF " fields, want 5"; bad = 1 } END { exit bad ? 1 : 0 }' toolchains/manifest; then
+	:
+else
+	report "toolchains/manifest has a record with the wrong number of fields"
+fi
+
+# Every script is executable, because one that is not is a file somebody has to know to run with
+# sh, and they will not.
+for script in $scripts; do
+	[ -x "$script" ] || report "$script is not executable"
+done
+
+if command -v shellcheck >/dev/null 2>&1; then
+	# shellcheck disable=SC2086
+	shellcheck -s sh $scripts || report "shellcheck had something to say"
+else
+	printf 'lint: no shellcheck on this machine, so the shell rules were not checked\n' >&2
+fi
+
+if [ "$problems" -eq 0 ]; then
+	printf 'lint: clean\n' >&2
+else
+	printf 'lint: %d problems\n' "$problems" >&2
+	exit 1
+fi

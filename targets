@@ -1,0 +1,71 @@
+# How each rucc target is spelled to each tool, and what runs a binary for it.
+#
+# One record per line, tab separated, in this order:
+#
+#   tuple  zig  gcc  runner
+#
+# The tuple is rucc's canonical spelling, which is the one in docs/TARGETS.md in the compiler
+# repository and the one `rucc-tuple` parses to. Every other column is somebody else's spelling of
+# the same machine, and a dash means that tool has no way to say it.
+#
+# The zig column was not written from the documentation. Every entry in it was checked by running
+# `zig cc -target <spelling> -dM -E -x c /dev/null` against zig 0.16.0, which is the version pinned
+# in toolchains/manifest, and the dashes are the ones that failed. Three of them are worth knowing
+# about: zig lists illumos as an operating system and `zig cc` cannot target it, because there is
+# no libc for it in the distribution; wasm32-wasip1 and later are spelled `wasm32-wasi` with no
+# version, so the three rucc rows collapse onto one zig row and rucc's finer distinction has no
+# reference to compare against; and arm64ec has no spelling at all, which agrees with
+# spec/cross-compile/06-abis.md section 6.8 declining it.
+#
+# The gcc column is the Debian and Ubuntu cross compiler prefix, so `aarch64-linux-gnu` means
+# `aarch64-linux-gnu-gcc` from `gcc-aarch64-linux-gnu`. It is much sparser than the zig column and
+# that sparseness is the argument for this whole line of work: a per target gcc has to exist as a
+# package before you can compare against it, and for most of this table nobody has built one.
+#
+# The runner column is what executes a binary for that target on a Linux host. qemu user mode for
+# the Linux targets, and a dash everywhere else, because qemu user mode runs Linux binaries and a
+# Mach-O or a PE needs a different answer. spec/cross-compile/14-testing.md section 14.6 is the
+# rule for reading a result that came from an emulator rather than from hardware.
+
+x86_64-linux-gnu	x86_64-linux-gnu	x86_64-linux-gnu	qemu-x86_64
+x86_64-linux-musl	x86_64-linux-musl	-	qemu-x86_64
+aarch64-linux-gnu	aarch64-linux-gnu	aarch64-linux-gnu	qemu-aarch64
+aarch64-linux-musl	aarch64-linux-musl	-	qemu-aarch64
+riscv64-linux-gnu	riscv64-linux-gnu	riscv64-linux-gnu	qemu-riscv64
+riscv64-linux-musl	riscv64-linux-musl	-	qemu-riscv64
+i686-linux-gnu	x86-linux-gnu	i686-linux-gnu	qemu-i386
+armv7-linux-gnueabihf	arm-linux-gnueabihf	arm-linux-gnueabihf	qemu-arm
+armv7-linux-musleabihf	arm-linux-musleabihf	-	qemu-arm
+loongarch64-linux-gnu	loongarch64-linux-gnu	loongarch64-linux-gnu	qemu-loongarch64
+powerpc64le-linux-gnu	powerpc64le-linux-gnu	powerpc64le-linux-gnu	qemu-ppc64le
+s390x-linux-gnu	s390x-linux-gnu	s390x-linux-gnu	qemu-s390x
+aarch64-linux-android	aarch64-linux-android	-	qemu-aarch64
+x86_64-linux-android	x86_64-linux-android	-	qemu-x86_64
+riscv64-linux-android	riscv64-linux-android	-	qemu-riscv64
+x86_64-linux-gnux32	x86_64-linux-gnux32	x86_64-linux-gnux32	qemu-x86_64
+aarch64-macos	aarch64-macos	-	-
+x86_64-macos	x86_64-macos	-	-
+aarch64-ios	aarch64-ios	-	-
+aarch64-ios-simulator	aarch64-ios-simulator	-	-
+aarch64-ios-macabi	aarch64-maccatalyst	-	-
+x86_64-windows-gnu	x86_64-windows-gnu	x86_64-w64-mingw32	-
+x86_64-windows-msvc	x86_64-windows-msvc	-	-
+aarch64-windows-gnu	aarch64-windows-gnu	-	-
+aarch64-windows-msvc	aarch64-windows-msvc	-	-
+arm64ec-windows-msvc	-	-	-
+i686-windows-gnu	x86-windows-gnu	i686-w64-mingw32	-
+x86_64-freebsd	x86_64-freebsd	-	-
+aarch64-freebsd	aarch64-freebsd	-	-
+x86_64-netbsd	x86_64-netbsd	-	-
+aarch64-netbsd	aarch64-netbsd	-	-
+x86_64-openbsd	x86_64-openbsd	-	-
+x86_64-illumos	-	-	-
+x86_64-none	x86_64-freestanding-none	-	-
+aarch64-none	aarch64-freestanding-none	-	-
+riscv64-none	riscv64-freestanding-none	-	-
+i686-none	x86-freestanding-none	-	-
+armv7-none-eabi	arm-freestanding-eabi	arm-none-eabi	-
+armv7m-none-eabi	thumb-freestanding-eabi	arm-none-eabi	-
+wasm32-wasip1	wasm32-wasi	-	-
+wasm32-wasip3	-	-	-
+wasm32-none	wasm32-freestanding	-	-

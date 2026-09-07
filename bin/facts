@@ -1,0 +1,139 @@
+#!/bin/sh
+# What the reference compiler says about a target's scalar types.
+#
+# usage: bin/facts <tuple>...
+#        bin/facts --all
+#        bin/facts --record         write facts/<tuple>.facts for every target
+#        bin/facts --check          fail if any file in facts/ is out of date
+#
+# The facts come out of the preprocessor rather than out of a program, because a program has to
+# run and most of this table has no machine to run on. `cc -dM -E` on an empty file is one
+# invocation per target and it answers everything that is a type width, a signedness or a byte
+# order, which is most of what two compilers disagree about when they disagree quietly.
+#
+# The one thing it does not answer is alignment, and corpus/layout/ answers that instead, by
+# asserting the relationships and letting the compiler reject the file. That is a better shape for
+# alignment anyway: `_Alignof(double) == 4` on i386 is a claim worth writing down in C where
+# somebody reads it, rather than a number in a generated file where nobody does.
+#
+# The output is sorted `key=value` lines with a two line header naming the reference and its
+# version. Nothing in it is a timestamp or a path, so two runs on two machines produce the same
+# bytes, which is what makes `--check` a useful CI job rather than a source of noise.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+die() { printf 'facts: %s\n' "$*" >&2; exit 1; }
+
+reference=${RUCC_CROSS_REFERENCE:-zig}
+case $reference in
+zig) version=$(awk -F'\t' '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest") ;;
+gcc) version=system ;;
+*) die "RUCC_CROSS_REFERENCE is $reference, and it has to be zig or gcc" ;;
+esac
+
+# Every target the reference has a spelling for, in table order.
+runnable() {
+	column=2
+	[ "$reference" = zig ] || column=3
+	awk -F'\t' -v c="$column" '/^[^#]/ && NF > 1 && $c != "-" { print $1 }' "$here/targets"
+}
+
+# The macros worth reading, and what each one is called here. A name on the left that the
+# reference does not define is left out of the output rather than reported as empty, because a
+# missing `__SIZEOF_INT128__` means the target has no `__int128` and that is a fact, not a gap.
+one() {
+	tuple=$1
+	macros=$("$here/bin/reference-cc" "$tuple" -dM -E -x c /dev/null 2>/dev/null) ||
+		die "$tuple: the reference compiler would not preprocess an empty file"
+
+	# The body of a macro is everything after its name, and it is taken by length rather than by
+	# field, because an object-like macro with an empty body is a line with nothing after the
+	# name and splitting that into fields loses the difference between empty and absent. On
+	# Darwin and 32-bit COFF `__USER_LABEL_PREFIX__` is an underscore and everywhere else it is
+	# empty, so that difference is one of the facts being recorded.
+	value() { printf '%s\n' "$macros" | awk -v m="#define $1" 'index($0, m " ") == 1 { print substr($0, length(m) + 2); exit } $0 == m { print ""; exit }'; }
+	defined() { printf '%s\n' "$macros" | awk -v m="#define $1" 'index($0, m " ") == 1 || $0 == m { found = 1 } END { exit found ? 0 : 1 }'; }
+	emit() { if [ -n "$2" ]; then printf '%s=%s\n' "$1" "$2"; fi; }
+
+	printf '# %s\n' "$tuple"
+	printf '# reference: %s %s\n' "$reference" "$version"
+
+	{
+		emit char_bit "$(value __CHAR_BIT__)"
+		if defined __CHAR_UNSIGNED__; then emit char_signed no; else emit char_signed yes; fi
+		if defined __WCHAR_UNSIGNED__; then emit wchar_signed no; else emit wchar_signed yes; fi
+
+		case $(value __BYTE_ORDER__) in
+		__ORDER_BIG_ENDIAN__) emit endian big ;;
+		*) emit endian little ;;
+		esac
+
+		# An empty `__USER_LABEL_PREFIX__` is ELF and an underscore is Mach-O and 32-bit COFF.
+		# It is spelled as a word here rather than as the character, so that a file with a
+		# trailing space in it does not become a diff nobody can see.
+		if [ -n "$(value __USER_LABEL_PREFIX__)" ]; then emit label_prefix underscore; else emit label_prefix none; fi
+
+		emit sizeof_short "$(value __SIZEOF_SHORT__)"
+		emit sizeof_int "$(value __SIZEOF_INT__)"
+		emit sizeof_long "$(value __SIZEOF_LONG__)"
+		emit sizeof_long_long "$(value __SIZEOF_LONG_LONG__)"
+		emit sizeof_pointer "$(value __SIZEOF_POINTER__)"
+		emit sizeof_size_t "$(value __SIZEOF_SIZE_T__)"
+		emit sizeof_ptrdiff_t "$(value __SIZEOF_PTRDIFF_T__)"
+		emit sizeof_wchar_t "$(value __SIZEOF_WCHAR_T__)"
+		emit sizeof_float "$(value __SIZEOF_FLOAT__)"
+		emit sizeof_double "$(value __SIZEOF_DOUBLE__)"
+		emit sizeof_long_double "$(value __SIZEOF_LONG_DOUBLE__)"
+		if defined __SIZEOF_INT128__; then emit sizeof_int128 "$(value __SIZEOF_INT128__)"; else emit sizeof_int128 none; fi
+
+		# The mantissa digits are what tell the four `long double` formats apart, and they are
+		# the reason rucc-abi carries a format beside a width instead of only a width. Two
+		# targets with a sixteen byte `long double` can still disagree about every bit in it.
+		case $(value __LDBL_MANT_DIG__) in
+		53) emit long_double_format double ;;
+		64) emit long_double_format x87_extended ;;
+		106) emit long_double_format double_double ;;
+		113) emit long_double_format quad ;;
+		*) emit long_double_format "unknown_$(value __LDBL_MANT_DIG__)" ;;
+		esac
+
+		emit biggest_alignment "$(value __BIGGEST_ALIGNMENT__)"
+		emit size_t_type "$(value __SIZE_TYPE__)"
+		emit wchar_t_type "$(value __WCHAR_TYPE__)"
+		emit intptr_type "$(value __INTPTR_TYPE__)"
+	} | sort
+}
+
+case ${1:-} in
+"") die "usage: bin/facts <tuple>... or --all or --record or --check" ;;
+--all)
+	for tuple in $(runnable); do one "$tuple"; done
+	;;
+--record)
+	mkdir -p "$here/facts"
+	for tuple in $(runnable); do
+		one "$tuple" > "$here/facts/$tuple.facts"
+		printf 'recorded %s\n' "$tuple" >&2
+	done
+	;;
+--check)
+	bad=0
+	for tuple in $(runnable); do
+		file=$here/facts/$tuple.facts
+		if [ ! -f "$file" ]; then
+			printf 'facts/%s.facts is missing\n' "$tuple" >&2
+			bad=1
+		elif ! one "$tuple" | diff -u "$file" - >&2; then
+			printf 'facts/%s.facts is out of date\n' "$tuple" >&2
+			bad=1
+		fi
+	done
+	[ "$bad" -eq 0 ] || die "run bin/facts --record and read the diff before committing it"
+	printf 'facts: every file matches what %s %s says\n' "$reference" "$version" >&2
+	;;
+*)
+	for tuple in "$@"; do one "$tuple"; done
+	;;
+esac

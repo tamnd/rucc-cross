@@ -1,4 +1,0 @@
-# `cargo xtask` rather than a shell script, so that the house rules are the same command on
-# every host and need nothing installed that the toolchain does not already provide.
-[alias]
-xtask = "run --quiet --package xtask --"

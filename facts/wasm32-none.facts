@@ -1,0 +1,24 @@
+# wasm32-none
+# reference: zig 0.16.0
+biggest_alignment=16
+char_bit=8
+char_signed=yes
+endian=little
+intptr_type=long int
+label_prefix=none
+long_double_format=quad
+size_t_type=long unsigned int
+sizeof_double=8
+sizeof_float=4
+sizeof_int=4
+sizeof_int128=16
+sizeof_long_double=16
+sizeof_long_long=8
+sizeof_long=4
+sizeof_pointer=4
+sizeof_ptrdiff_t=4
+sizeof_short=2
+sizeof_size_t=4
+sizeof_wchar_t=4
+wchar_signed=yes
+wchar_t_type=int

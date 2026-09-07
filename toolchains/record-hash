@@ -1,0 +1,34 @@
+#!/bin/sh
+# Download an archive once and print the toolchains/manifest line for it.
+#
+# usage: toolchains/record-hash <tool> <version> <host> <url>
+#
+# This exists so that nobody types a hash from memory or pastes one from a web page they did not
+# check. Adding a toolchain is: run this, read the line, paste it into toolchains/manifest, and
+# say in the commit message where the URL came from and who publishes it.
+#
+# It deliberately does not edit the manifest. A file that a script appends to is a file nobody
+# reviews, and the whole point of pinning is that somebody looked.
+
+set -eu
+
+[ $# -eq 4 ] || { echo "usage: toolchains/record-hash <tool> <version> <host> <url>" >&2; exit 1; }
+
+tool=$1
+version=$2
+host=$3
+url=$4
+
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT INT TERM
+
+echo "fetching $url" >&2
+curl -fsSL --retry 3 -o "$tmp" "$url"
+
+if command -v sha256sum >/dev/null 2>&1; then
+	sum=$(sha256sum "$tmp" | cut -d' ' -f1)
+else
+	sum=$(shasum -a 256 "$tmp" | cut -d' ' -f1)
+fi
+
+printf '%s\t%s\t%s\t%s\t%s\n' "$tool" "$version" "$host" "$sum" "$url"

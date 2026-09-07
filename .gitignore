@@ -1,15 +1,17 @@
-/target
-**/*.rs.bk
-*.pdb
-
-# Sysroots, stub libraries and header trees. Large, machine specific, and regenerable, which is
-# the whole point of generating them.
-/sysroots
+# Toolchains and downloads. They live in $RUCC_CROSS_CACHE, which is ~/.cache/rucc-cross by
+# default and outside the checkout on purpose, so nothing here should ever appear. These lines are
+# for the person who set the cache to the working directory and then wondered why git noticed.
 /cache
-/dist
 *.tar.gz
 *.tar.xz
+*.tar.bz2
 *.zip
+
+# Build output from a corpus run that was interrupted before its temporary directory went away.
+*.o
+*.obj
+*.exe
+/out
 
 # Editor and OS noise
 .DS_Store

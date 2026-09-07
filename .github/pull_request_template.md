@@ -8,18 +8,17 @@
 
 ## Evidence
 
-<!-- What you ran and what it said. A pull request that changes the target table needs the corpus results behind the change, per spec/04-target-matrix.md section 4.7. -->
+<!-- What you ran and what it said. A change to a facts file is evidence. A change to an assertion is evidence when the compiler output that forced it is quoted beside it. -->
 
 ## Milestone
 
-<!-- Which milestone in spec/15-plan.md, and the tracking issue this closes or advances. -->
+<!-- Which milestone in spec/cross-compile/15-plan.md in the compiler repository, and the tracking issue this advances. -->
 
-Part of #
+Part of tamnd/rucc#
 
 ## Checklist
 
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo xtask style` passes
-- [ ] `cargo xtask targets --check` passes
-- [ ] Labels for the area and the milestone are set
-- [ ] The tracking issue's checklist is updated and a comment says what landed
+- [ ] `bin/lint` passes
+- [ ] `bin/facts --check` passes, and any diff it printed is explained above
+- [ ] `bin/compile-corpus` passes
+- [ ] `bin/run-corpus` passes, or says which rows it skipped and why
