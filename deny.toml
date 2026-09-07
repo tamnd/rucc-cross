@@ -1,0 +1,46 @@
+# cargo-deny configuration, run in CI on every commit and again every night for advisories.
+#
+# The dependency list in the root Cargo.toml is empty today. This file is what makes growing it
+# a decision rather than a drift, which matters more here than in most repositories: the work
+# ahead involves downloading archives and parsing binary formats, and both of those attract
+# dependency trees.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# We ship under Apache-2.0 and only take dependencies whose terms that license can carry.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "MIT",
+  "MIT-0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+  # Output has to be byte identical across hosts and across runs, per spec/02-the-goal.md claim
+  # 5. A crate that reads the clock or the locale is a crate that can break that quietly.
+  { name = "chrono" },
+  { name = "time" },
+]
+skip = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

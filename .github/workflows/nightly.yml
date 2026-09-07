@@ -1,0 +1,118 @@
+# The slow half. Everything that is too expensive, too wide or too dependent on the outside
+# world to sit in the per-commit gate.
+#
+# This is the file the whole repository exists to make possible. The compiler's gate has to stay
+# under twenty minutes on every commit, and cross-compilation testing means emulators, foreign
+# sysroots and fetched SDKs. Putting that here rather than there is the trade, and the trade only
+# pays if failures here are read. The `report` job at the bottom is what makes them visible.
+
+name: nightly
+
+on:
+  schedule:
+    # After the compiler repository's nightly, so that a shared failure is easy to order.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # A new advisory does not wait for somebody to push a commit, so neither does this.
+  advisories:
+    name: new advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.87.2
+        with:
+          tool: cargo-deny
+      - name: cargo deny check advisories
+        run: cargo deny --all-features check advisories
+
+  # Breakage in a future compiler is cheaper to fix while it is still in beta than on the day it
+  # becomes stable and the pin in rust-toolchain.toml has to move.
+  upcoming-rust:
+    name: rust ${{ matrix.channel }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [beta, nightly]
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install
+        run: rustup toolchain install ${{ matrix.channel }} --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.channel }}
+      - name: cargo test
+        run: cargo +${{ matrix.channel }} test --workspace --all-features
+      - name: cargo clippy
+        run: cargo +${{ matrix.channel }} clippy --workspace --all-targets --all-features
+
+  # The big-endian row of spec/04-target-matrix.md section 4.4, which is the one to argue about
+  # and the one worth having. A cross compiler has two ends and the host end is where nobody
+  # looks, so the code that will one day byte-swap while writing a little-endian object gets
+  # exercised on a host where the swap is not a no-op. Zig fixed big-endian host bugs in 2026,
+  # which is evidence that they exist and that they are found late.
+  #
+  # It runs under emulation and it says so. spec/04-target-matrix.md section 4.6 is explicit
+  # that a failure seen only under emulation leaves the emulator a suspect.
+  big-endian-host:
+    name: build and test on a big-endian host
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.87.2
+        with:
+          tool: cross
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: s390x
+      - name: cargo test under qemu-s390x
+        run: cross test --workspace --all-features --target s390x-unknown-linux-gnu
+
+  # The other direction: the release artifact most people will actually download is a static
+  # binary, and a static binary that was never built is a claim rather than an artifact.
+  static-binary:
+    name: static musl binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: taiki-e/install-action@v2.87.2
+        with:
+          tool: cross
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: musl
+      - name: build and run
+        run: |
+          set -euo pipefail
+          cross build --release --bin rucc-cross --target x86_64-unknown-linux-musl
+          file target/x86_64-unknown-linux-musl/release/rucc-cross
+          cross run --release --bin rucc-cross --target x86_64-unknown-linux-musl -- targets
+
+  report:
+    name: nightly
+    if: always()
+    needs: [advisories, upcoming-rust, big-endian-host, static-binary]
+    runs-on: ubuntu-24.04
+    steps:
+      # `upcoming-rust` is allowed to fail without failing the run, because a nightly compiler
+      # regression is somebody else's bug and a red mark for it every morning is a red mark
+      # people stop reading. Everything else here is ours.
+      - name: fail if anything but the future compilers failed
+        if: needs.advisories.result != 'success' || needs.big-endian-host.result != 'success' || needs.static-binary.result != 'success'
+        run: exit 1
+      - name: pass
+        run: echo "nightly is clean"
