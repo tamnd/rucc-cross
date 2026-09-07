@@ -19,6 +19,12 @@
 # The output is sorted `key=value` lines with a two line header naming the reference and its
 # version. Nothing in it is a timestamp or a path, so two runs on two machines produce the same
 # bytes, which is what makes `--check` a useful CI job rather than a source of noise.
+#
+# The sort is `LC_ALL=C sort` and not `sort`. Collation is a locale setting, and the two locales
+# this repository actually runs under disagree about where `_` and `=` fall relative to a digit,
+# which puts `sizeof_int` on either side of `sizeof_int128` depending on the machine. A file
+# recorded on one and checked on the other is then a diff with no fact in it, which is exactly the
+# kind of noise that gets a check job disabled.
 
 set -eu
 
@@ -103,7 +109,7 @@ one() {
 		emit size_t_type "$(value __SIZE_TYPE__)"
 		emit wchar_t_type "$(value __WCHAR_TYPE__)"
 		emit intptr_type "$(value __INTPTR_TYPE__)"
-	} | sort
+	} | LC_ALL=C sort
 }
 
 case ${1:-} in

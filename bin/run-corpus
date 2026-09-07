@@ -13,6 +13,10 @@
 # The expected transcript is the same file for every target. That is the whole design: the corpus
 # prints values rather than sizes, so a target that prints something different has miscounted a
 # register or a stack slot. A per target expected file would turn a bug into a recorded fact.
+#
+# A skipped row says why it was skipped, and the reasons are specific. "Skipped" with no reason is
+# a result that reads as coverage and is not, which over a few months is how a table of targets
+# stops meaning anything.
 
 set -eu
 
@@ -62,12 +66,43 @@ for tuple in $tuples; do
 
 	# Static where it is possible, because a statically linked binary is one fewer thing that
 	# can be wrong about a cross build and qemu user mode needs no interpreter path for it.
-	# Darwin refuses outright: there is no static libSystem and there has not been one since
-	# 10.6, so the Darwin rows link dynamically and run on the machine they were built on.
+	# Three groups cannot have that, for three different reasons.
+	#
+	# Darwin has no static libSystem and has not had one since 10.6, so those rows link
+	# dynamically and run on the machine they were built on.
+	#
+	# glibc is the same answer from the other direction: what zig ships is a set of stubs it
+	# links against and there is no static build of it, so the glibc rows link dynamically
+	# too. That leaves them runnable on the machine they were built for and not under qemu
+	# user mode, which would need the target's loader and its shared libc sitting on this
+	# disk. Fetching a glibc runtime per architecture is what document 13 is about and not
+	# something a test script should be doing behind the person running it.
+	#
+	# The android rows have no libc here at all. zig carries bionic's headers and not bionic,
+	# so nothing links and there is nothing to run. They are still covered by
+	# bin/compile-corpus, which is `-c` and needs no libc.
 	link=-static
+	reason=""
 	case $tuple in
-	*-macos | *-ios*) link="" ;;
+	*-macos | *-ios*)
+		link=""
+		;;
+	*-android | *-android.*)
+		reason="zig carries bionic's headers and not bionic, so nothing links"
+		;;
+	*-linux-gnu | *-linux-gnu.* | *-linux-gnueabi* | *-linux-gnux32)
+		link=""
+		if [ -n "$runner" ]; then
+			reason="glibc links dynamically and its loader for $tuple is not on this machine"
+		fi
+		;;
 	esac
+
+	if [ -n "$reason" ]; then
+		printf '%-24s skipped, %s\n' "$tuple" "$reason"
+		skipped=$((skipped + 1))
+		continue
+	fi
 
 	for level in -O0 -O2; do
 		for source in "$here"/corpus/abi/*.c "$here"/corpus/exec/*.c; do
