@@ -24,9 +24,9 @@ pub fn run(root: &Path, check_only: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
+    // The directory rather than path.parent(), because the path was built from it two lines up
+    // and asking for the parent of something we just joined is a question with a known answer.
+    if let Err(error) = std::fs::create_dir_all(root.join("docs")) {
         eprintln!("error: {error}");
         return ExitCode::FAILURE;
     }
