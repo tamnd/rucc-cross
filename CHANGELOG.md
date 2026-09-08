@@ -4,6 +4,14 @@ The format is a section per change, newest first, written by hand. There are no 
 
 ## Unreleased
 
+`bin/compile-abi-corpus` compiles the compiler's generated record layout corpus against the reference, and the gate runs it on every commit. That corpus is written by `cargo xtask abi-corpus` in tamnd/rucc, one C file per target named for the target, and every line in it is a `_Static_assert` about a size, an alignment or a member offset that came out of `rucc_types::layout_record`. Compiling it here is what turns those assertions into a comparison, because the reference either agrees, in which case the file compiles, or disagrees, in which case the assertion that failed names the record and the number.
+
+It is a second script rather than a flag on `bin/compile-corpus` because the two are not the same test. That one takes C written by hand in this repository and compiles it for every row of the table, so a failure means the corpus needs fixing. This one takes C the compiler produced and compiles it for the target it names, so a failure means the compiler needs fixing. A file whose target has no spelling for the current reference is skipped and counted rather than compiled against a neighbour, and the count is printed, because a corpus that quietly stopped checking half its targets looks exactly like one that passes.
+
+The job checks the compiler out at its default branch rather than at a pin, which is the only way it can be a check at all: a pin would keep the build green while checking last month's numbers. The nightly `second-opinion` job compiles the same corpus against cross gcc, which is the run that would catch rucc having been made to agree with clang about something gcc does differently.
+
+Fifteen of the forty two rows have a file today, because laying a record out in the compiler still needs a three field triple while `rucc-abi` describes all forty two. The number is printed on every run in the compiler repository and it is the gap to close, not a limit of this job.
+
 `bin/sysroot` produces a musl sysroot for a target and writes the manifest that says what went into it. `sysroots/manifest` pins the musl source by version, licence and sha256, the same shape `toolchains/manifest` uses, and the version is 1.2.5 because that is what Zig 0.16 carries and comparing against a different one would compare two things at once. The build uses the pinned zig as the cross compiler rather than whatever `cc` the machine has, for the same reason.
 
 The layout it produces is the one `rucc-sysroot` in the compiler repository reads: `include/<arch>` for the headers that differ by architecture, `include/generic` for the copy every architecture shares, `lib` for the start files and the archives, and `manifest` at the top. musl installs one flat include tree with the architecture specific files in `bits/`, so the split is a move of that one directory.

@@ -25,11 +25,14 @@ toolchains/install zig          fetch the pinned reference compiler
 bin/facts --all                 what the reference says about every target's scalar types
 bin/facts --check               fail if anything in facts/ has drifted
 bin/compile-corpus              compile the layout corpus for all forty two targets
+bin/compile-abi-corpus          compile the compiler's generated layout corpus, one file per target
 bin/run-corpus                  build and run the executing corpus under qemu
 bin/sysroot aarch64-linux-musl  produce a musl sysroot, with a manifest
 bin/sysroot --check a b         compare two manifests, which is the reproducibility check
 bin/lint                        the house rules
 ```
+
+`bin/compile-abi-corpus` is the one that reads the other repository. It takes the directory `cargo xtask abi-corpus` writes, which defaults to `../rucc/tests/abi-corpus` and can be given as an argument or in `RUCC_ABI_CORPUS`, and compiles each file for the target it is named after. The difference from `bin/compile-corpus` is what the C is: that one is C somebody wrote here, this one is C the compiler generated, and every line of it is a `_Static_assert` about a size, an alignment or a member offset that came out of `rucc_types::layout_record`. So a failure is not a corpus that will not build, it is the compiler and the reference disagreeing about a record, and the assertion that failed names it.
 
 Set `RUCC_CROSS_REFERENCE=gcc` to compare against the platform's cross gcc instead of zig, for the rows where one exists. That column is much sparser than the zig one and the sparseness is the argument for this whole line of work: a per target gcc has to exist as a package before you can compare against it, and for most of the table nobody has built one.
 

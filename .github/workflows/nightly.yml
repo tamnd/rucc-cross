@@ -74,6 +74,11 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
       - name: install the cross compilers and qemu
         run: |
           ./toolchains/install gcc-cross
@@ -84,6 +89,14 @@ jobs:
         env:
           RUCC_CROSS_REFERENCE: gcc
         run: ./bin/compile-corpus
+      # The compiler's generated corpus against the other reference. The gate compiles it against
+      # zig, which is clang, so this is the run that would catch rucc having been made to agree with
+      # clang about something gcc does differently. Section 6.9 of the compiler's cross specification
+      # says which side wins when they disagree, and this is what asks the question.
+      - name: the compiler's layout corpus
+        env:
+          RUCC_CROSS_REFERENCE: gcc
+        run: ./bin/compile-abi-corpus rucc/tests/abi-corpus
       - name: the executing corpus
         env:
           RUCC_CROSS_REFERENCE: gcc
