@@ -67,7 +67,9 @@ musl_arch() {
 # place a spelling is recorded stays the one place.
 zig_target() {
 	spelling=$(awk -F'\t' -v t="$1" '$1 == t { print $2; exit }' "$here/targets")
-	[ -n "$spelling" ] && [ "$spelling" != "-" ] || die "$1 has no zig spelling in the targets table"
+	if [ -z "$spelling" ] || [ "$spelling" = "-" ]; then
+		die "$1 has no zig spelling in the targets table"
+	fi
 	printf '%s\n' "$spelling"
 }
 
