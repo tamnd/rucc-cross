@@ -40,7 +40,7 @@ The download cache is `$RUCC_CROSS_CACHE`, which defaults to `~/.cache/rucc-cros
 
 ## What it has found so far
 
-The corpus earns its keep by being wrong in public. Six things, each of which was a plausible belief before the reference rejected it.
+The corpus earns its keep by being wrong in public. Seven things, each of which was a plausible belief before the reference rejected it.
 
 **Plain `char` is unsigned on s390x.** It was written down as signed, in with x86. The s390x ELF ABI says unsigned, and clang agrees, and the target had never been compiled for.
 
@@ -52,9 +52,11 @@ The corpus earns its keep by being wrong in public. Six things, each of which wa
 
 **`__int128` is not a 64-bit only type.** wasm32 has it and so does `x86_64-linux-gnux32`, both with four byte pointers, which is a useful reminder that the pointer width and the widest integer are separate facts.
 
+**wasm32 has a sixteen byte IEEE quad `long double`.** `rucc-abi` grouped it with 32-bit ARM on the reasoning that a machine with four byte pointers has nothing wider than a `double`, and `facts/wasm32-none.facts` had recorded quad and sixteen from the first day. The fact was on disk and the rule contradicted it, which is the case a recorded fact cannot catch on its own and the generated record corpus does, because the corpus asks the compiler for a struct rather than asking it for a list of sizes.
+
 **A sysroot built on a mac and a sysroot built on a Linux box were different files with identical instructions.** The 219 headers matched on the first try and the six compiled artifacts did not, because clang writes the working directory into `DW_AT_comp_dir` of every object it produces, including the ones assembled from `.s` files, and `/Users/apple/...` is not `/home/tam/...`. `bin/sysroot` passes `-fdebug-compilation-dir=.` and `-ffile-prefix-map` for that reason, and with them all four musl targets reproduce byte for byte across the two hosts.
 
-The first two were bugs in `rucc-tuple` and `rucc-abi` and are fixed. The next three were bugs in this corpus, and the comments in `corpus/layout/scalars.c` say so where they happened. The last one is why `bin/sysroot` has two flags in it that look like noise and are not.
+The first two and the sixth were bugs in `rucc-tuple` and `rucc-abi` and all three are fixed. The middle three were bugs in this corpus, and the comments in `corpus/layout/scalars.c` say so where they happened. The last one is why `bin/sysroot` has two flags in it that look like noise and are not.
 
 ## Layout
 
