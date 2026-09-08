@@ -25,7 +25,7 @@ report() {
 }
 
 markdown=$(find . -name '*.md' -not -path './.git/*' | sort)
-scripts="bin/compile-corpus bin/facts bin/lint bin/reference-cc bin/run-corpus bin/sysroot toolchains/install toolchains/record-hash"
+scripts="bin/compile-abi-corpus bin/compile-corpus bin/facts bin/lint bin/reference-cc bin/run-corpus bin/sysroot toolchains/install toolchains/record-hash"
 
 # An em dash or an en dash. The rule is that a sentence which needs one is a sentence that wanted a
 # comma, a colon, a period or the word "to", and picking one of those is the author's job.

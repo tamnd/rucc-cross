@@ -1,0 +1,76 @@
+#!/bin/sh
+# Compile the compiler's generated record layout corpus against the reference.
+#
+# usage: bin/compile-abi-corpus [directory]
+#
+# The directory holds the output of `cargo xtask abi-corpus` in the compiler repository, which is
+# one C file per target named for that target's tuple. It defaults to $RUCC_ABI_CORPUS and then to
+# ../rucc/tests/abi-corpus, which is where it is when the two repositories sit side by side.
+#
+# This is not bin/compile-corpus with a different path. That one compiles this repository's own
+# corpus, which is C somebody wrote, for every target in the table. This one compiles C that rucc
+# generated, and every line of it is an assertion about a size, an alignment or a member offset
+# that came out of `rucc_types::layout_record`. So a failure here is not a corpus that will not
+# build: it is the compiler and the reference disagreeing about the layout of a record, and the
+# `_Static_assert` that failed names the record and the number.
+#
+# A file whose target has no spelling for the current reference is skipped and counted, rather than
+# compiled against a neighbour. The count is printed, because a corpus that quietly stopped
+# checking half its targets looks exactly like one that passes.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+reference=${RUCC_CROSS_REFERENCE:-zig}
+
+corpus=${1:-${RUCC_ABI_CORPUS:-$here/../rucc/tests/abi-corpus}}
+if [ ! -d "$corpus" ]; then
+	printf 'abi-corpus: %s is not a directory\n' "$corpus" >&2
+	printf 'abi-corpus: generate it with "cargo xtask abi-corpus" in the compiler repository\n' >&2
+	exit 1
+fi
+
+column=2
+[ "$reference" = zig ] || column=3
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT INT TERM
+
+passed=0
+failed=0
+skipped=0
+skipped_names=
+
+for source in "$corpus"/*.c; do
+	[ -e "$source" ] || break
+	tuple=$(basename "$source" .c)
+	spelling=$(awk -F'\t' -v c="$column" -v t="$tuple" \
+		'/^[^#]/ && NF > 1 && $1 == t { print $c }' "$here/targets")
+	if [ -z "$spelling" ]; then
+		printf 'abi-corpus: %s is not a row of the targets table\n' "$tuple" >&2
+		failed=$((failed + 1))
+		continue
+	fi
+	if [ "$spelling" = "-" ]; then
+		skipped=$((skipped + 1))
+		skipped_names="$skipped_names $tuple"
+		continue
+	fi
+	# `-c` and nothing else, because the corpus declares no functions and asks for no libc. That is
+	# what lets the freestanding rows be checked the same way as the hosted ones.
+	if "$here/bin/reference-cc" "$tuple" -std=c17 -Wall -Wextra -Werror \
+		-c -o "$out/$tuple.o" "$source" 2>"$out/$tuple.log"; then
+		passed=$((passed + 1))
+	else
+		failed=$((failed + 1))
+		printf '%s: the layout corpus did not compile\n' "$tuple" >&2
+		sed 's/^/    /' "$out/$tuple.log" >&2
+	fi
+done
+
+if [ "$skipped" -gt 0 ]; then
+	printf 'abi-corpus:%s have no %s spelling and were skipped\n' "$skipped_names" "$reference" >&2
+fi
+printf 'abi-corpus: %d compiled, %d failed, %d skipped, against %s\n' \
+	"$passed" "$failed" "$skipped" "$reference" >&2
+[ "$failed" -eq 0 ] && [ "$passed" -gt 0 ]
