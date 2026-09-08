@@ -1,0 +1,20 @@
+# The libc sources a sysroot is produced from, pinned.
+#
+# One record per line, tab separated, in this order:
+#
+#   libc  version  licence  sha256  url
+#
+# The licence column is spelled the way rucc-sysroot's manifest format spells it, because it is
+# copied into every line of every produced manifest and a second spelling of the same fact is a
+# second thing to get wrong.
+#
+# musl 1.2.5 is the version Zig 0.16 carries, which is recorded in
+# spec/cross-compile/01-research-2026.md in the compiler repository. Pinning the same version is
+# what makes the comparison between the two mean anything: a difference between our sysroot and
+# zig's is then a difference in how it was built rather than in what was built.
+#
+# Nothing here is fetched without a hash and nothing is fetched from a URL that is not on one of
+# these lines. `toolchains/record-hash musl 1.2.5 - <url>` downloads once and prints a line whose
+# fourth column is the hash, which is the column that belongs here, so nobody types one from memory.
+
+musl	1.2.5	mit	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	https://musl.libc.org/releases/musl-1.2.5.tar.gz

@@ -25,7 +25,7 @@ report() {
 }
 
 markdown=$(find . -name '*.md' -not -path './.git/*' | sort)
-scripts="bin/compile-corpus bin/facts bin/lint bin/reference-cc bin/run-corpus toolchains/install toolchains/record-hash"
+scripts="bin/compile-corpus bin/facts bin/lint bin/reference-cc bin/run-corpus bin/sysroot toolchains/install toolchains/record-hash"
 
 # An em dash or an en dash. The rule is that a sentence which needs one is a sentence that wanted a
 # comma, a colon, a period or the word "to", and picking one of those is the author's job.
@@ -48,7 +48,7 @@ done
 
 # Trailing whitespace, which matters more here than usual because the two data files are tab
 # separated and a stray tab at the end of a record is an empty field nobody can see.
-for file in $markdown targets toolchains/manifest $scripts; do
+for file in $markdown targets toolchains/manifest sysroots/manifest $scripts; do
 	if grep -n '[ 	]$' "$file" >/dev/null 2>&1; then
 		report "$file has trailing whitespace"
 	fi
@@ -64,6 +64,11 @@ if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 5 { print FILENAME ":" NR ": " NF " fi
 	:
 else
 	report "toolchains/manifest has a record with the wrong number of fields"
+fi
+if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 5 { print FILENAME ":" NR ": " NF " fields, want 5"; bad = 1 } END { exit bad ? 1 : 0 }' sysroots/manifest; then
+	:
+else
+	report "sysroots/manifest has a record with the wrong number of fields"
 fi
 
 # Every script is executable, because one that is not is a file somebody has to know to run with
