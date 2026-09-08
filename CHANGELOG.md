@@ -4,6 +4,12 @@ The format is a section per change, newest first, written by hand. There are no 
 
 ## Unreleased
 
+`bin/sysroot` produces a musl sysroot for a target and writes the manifest that says what went into it. `sysroots/manifest` pins the musl source by version, licence and sha256, the same shape `toolchains/manifest` uses, and the version is 1.2.5 because that is what Zig 0.16 carries and comparing against a different one would compare two things at once. The build uses the pinned zig as the cross compiler rather than whatever `cc` the machine has, for the same reason.
+
+The layout it produces is the one `rucc-sysroot` in the compiler repository reads: `include/<arch>` for the headers that differ by architecture, `include/generic` for the copy every architecture shares, `lib` for the start files and the archives, and `manifest` at the top. musl installs one flat include tree with the architecture specific files in `bits/`, so the split is a move of that one directory.
+
+This is the exit criterion of the sysroot half of tamnd/rucc#619, and running it found the thing it was built to find. All four musl targets were produced on a macOS arm64 laptop and on a Linux x86-64 box, and the first comparison had 219 identical headers and six different compiled artifacts. The difference was `DW_AT_comp_dir`: clang writes the working directory into every object, including the ones assembled from `.s` files, and the two machines have different home directories. With `-fdebug-compilation-dir=.` and `-ffile-prefix-map` the four targets reproduce byte for byte, manifest and contents, and `bin/sysroot --check` is the comparison as a command.
+
 The repository stops being a Rust workspace and becomes what its name says: the toolchains, the environment and the C corpus that the compiler is compared against.
 
 `crates/`, `xtask/`, `spec/`, `docs/`, `Cargo.toml`, `Cargo.lock` and the release workflow are gone. `rucc-tuple` and the target table moved to the compiler repository, where they belong, because they are compiler code and splitting the compiler across two repositories bought nothing except a version number between a crate and its only caller. The specification moved with them to `spec/cross-compile/`. Anything published in the 0.1.0 tag of this repository is superseded by that move, and the tag stays where it is as a record of where the code was.

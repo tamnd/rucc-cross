@@ -1,0 +1,247 @@
+#!/bin/sh
+# Produce a musl sysroot for a target, laid out the way rucc-sysroot reads one, with a manifest.
+#
+# usage: bin/sysroot <target>...
+#        bin/sysroot --check <manifest> <manifest>
+#
+# This is the producer that `rucc-sysroot` deliberately does not contain. That crate settles where
+# the files go and in what order they are searched, and says in its own documentation that fetching
+# is somebody else's problem because it needs a cache, a provenance record and a network policy.
+# This is that somebody.
+#
+# What it does, for each target: fetch the pinned musl source from sysroots/manifest and verify its
+# hash, configure it against the pinned zig as the cross compiler, build it, and lay the result out
+# as include/<arch>, include/generic and lib, which is the shape `Sysroot` in that crate describes.
+# Then walk the tree, hash every file, and write the manifest.
+#
+# The point of it is the exit criterion of the sysroot half of tamnd/rucc#619: the same target
+# produced on two different hosts gives two manifests that are identical. Byte identical output for
+# a target needs byte identical inputs for it first, and this is the part that has to hold before
+# any claim about the compiler's output is worth measuring.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced sysroot
+# survives a branch switch. Producing one that is already there is a no-op unless --force is given.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "sysroot: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The pinned zig, which is the cross compiler every one of these builds uses. Not the host's cc,
+# because a sysroot produced by whatever compiler happened to be installed is a sysroot whose
+# contents are a fact about the machine, which is the thing this whole exercise is against.
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+# musl's name for the architecture, which is also rucc-sysroot's name for the per architecture
+# header directory. The two agree everywhere musl has a port, and the places they would not agree
+# are the ILP32 rows that musl has no port for at all.
+musl_arch() {
+	case $1 in
+	x86_64-linux-musl) printf 'x86_64\n' ;;
+	aarch64-linux-musl) printf 'aarch64\n' ;;
+	riscv64-linux-musl) printf 'riscv64\n' ;;
+	armv7-linux-musleabihf) printf 'arm\n' ;;
+	*) die "$1 is not one of the musl targets in the targets table" ;;
+	esac
+}
+
+# How zig spells the target, read out of the targets table rather than guessed, so that the one
+# place a spelling is recorded stays the one place.
+zig_target() {
+	spelling=$(awk -F'\t' -v t="$1" '$1 == t { print $2; exit }' "$here/targets")
+	if [ -z "$spelling" ] || [ "$spelling" = "-" ]; then
+		die "$1 has no zig spelling in the targets table"
+	fi
+	printf '%s\n' "$spelling"
+}
+
+# Fetch and unpack the pinned musl source once, shared by every target, and print where it went.
+musl_source() {
+	line=$(awk -F'\t' '$1 == "musl" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no musl line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/musl-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xzf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+# Everything under a directory, hashed, as manifest lines. Sorted in the C locale because that is
+# the order rucc-sysroot renders a manifest in, and a manifest that came out in the filesystem's
+# order would report a difference between two identical sysroots.
+#
+# The names here are all prefixed because sh has no local variables that every sh agrees on, and
+# this function is called from the middle of produce() with a redirect rather than in a subshell,
+# so a plain `root=$1` would overwrite the caller's.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_licence=$3
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			printf '%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_source" "$(sha256 "$walk_file")" "$walk_licence"
+		done
+	)
+}
+
+produce() {
+	target=$1
+	arch=$(musl_arch "$target")
+	root=$cache/sysroots/$target
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "$target is already produced in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	source=$(musl_source)
+	version=$(basename "$source" | sed 's/^musl-//')
+	licence=$(awk -F'\t' '$1 == "musl" { print $3; exit }' "$pins")
+	cc=$(zig)
+	triple=$(zig_target "$target")
+
+	# The build happens in a copy rather than in the unpacked source, because four targets share one
+	# source tree and musl's build is not out of tree. The copy is named after the target so two of
+	# them can run at once.
+	build=$cache/sysroots/$target.build
+	rm -rf "$build" "$root.part"
+	mkdir -p "$(dirname "$build")"
+	cp -R "$source" "$build"
+
+	# zig is one binary with the compiler, the archiver and the ranlib in it, and musl's configure
+	# wants three commands, so it gets three. Written into the build directory rather than a
+	# temporary one so that a failed build can be poked at.
+	#
+	# The two prefix map flags are the whole reason this produces the same bytes on two machines.
+	# Without them clang writes the working directory into DW_AT_comp_dir of every object, including
+	# the ones built from assembly, so `/home/tam/...` and `/Users/apple/...` come out as different
+	# files with identical instructions. musl already compiles with source paths relative to the
+	# build directory, so mapping the directory itself to a dot is all that is left.
+	wrap=$build/.tools
+	mkdir -p "$wrap"
+	printf '#!/bin/sh\nexec %s cc -target %s -fdebug-compilation-dir=. -ffile-prefix-map=%s=. "$@"\n' \
+		"$cc" "$triple" "$build" >"$wrap/cc"
+	printf '#!/bin/sh\nexec %s ar "$@"\n' "$cc" >"$wrap/ar"
+	printf '#!/bin/sh\nexec %s ranlib "$@"\n' "$cc" >"$wrap/ranlib"
+	chmod +x "$wrap/cc" "$wrap/ar" "$wrap/ranlib"
+
+	say "building musl $version for $target"
+	staging=$build/.staging
+	(
+		cd "$build" || exit 1
+		./configure --target="$triple" --disable-shared --prefix=/ \
+			CC="$wrap/cc" AR="$wrap/ar" RANLIB="$wrap/ranlib" >"$build/.configure.log" 2>&1 ||
+			{ tail -20 "$build/.configure.log" >&2; exit 1; }
+		make -j"$(jobs_available)" >"$build/.make.log" 2>&1 ||
+			{ tail -30 "$build/.make.log" >&2; exit 1; }
+		make DESTDIR="$staging" install >>"$build/.make.log" 2>&1 ||
+			{ tail -30 "$build/.make.log" >&2; exit 1; }
+	) || die "musl did not build for $target, and the logs are in $build"
+
+	# Section 8.3's split. musl installs one flat include tree with the per architecture files in
+	# bits/, so bits/ becomes include/<arch>/bits and everything else becomes include/generic. The
+	# two are searched in that order, so <bits/alltypes.h> finds the architecture's copy first and
+	# every other header finds the one copy there is.
+	mkdir -p "$root.part/include/$arch" "$root.part/include/generic" "$root.part/lib"
+	cp -R "$staging/include/bits" "$root.part/include/$arch/bits"
+	(
+		cd "$staging/include" || exit 1
+		find . -mindepth 1 -maxdepth 1 ! -name bits -exec cp -R {} "$root.part/include/generic/" \;
+	)
+	cp "$staging"/lib/*.o "$staging"/lib/*.a "$root.part/lib/"
+
+	{
+		printf 'rucc sysroot manifest 1\ntarget\t%s\n' "$target"
+		manifest_lines "$root.part" "musl-$version" "$licence"
+	} >"$root.part/manifest"
+
+	rm -rf "$root" "$build"
+	mv "$root.part" "$root"
+	say "$target is in $root, $(grep -c '' "$root/manifest") manifest lines"
+	printf '%s\n' "$root/manifest"
+}
+
+jobs_available() {
+	if command -v nproc >/dev/null 2>&1; then
+		nproc
+	elif command -v sysctl >/dev/null 2>&1; then
+		sysctl -n hw.ncpu
+	else
+		printf '2\n'
+	fi
+}
+
+# Compare two manifests and say what differs, which is the check the exit criterion asks for.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+[ $# -gt 0 ] || die "usage: bin/sysroot <target>... or bin/sysroot --check <manifest> <manifest>"
+
+case $1 in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/sysroot --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	shift
+	[ $# -gt 0 ] || die "usage: bin/sysroot --force <target>..."
+	for target in "$@"; do produce "$target"; done
+	;;
+-*) die "unknown option $1" ;;
+*)
+	for target in "$@"; do produce "$target"; done
+	;;
+esac

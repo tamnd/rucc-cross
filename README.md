@@ -16,6 +16,8 @@ Three things, and they are separable.
 
 **The corpus.** `corpus/layout` is C that any correct compiler for a target must accept, written as assertions with the reason beside them. `corpus/abi` is C that has to produce the same output on every target, so a target that produces different output has miscounted a register rather than laid something out differently. `corpus/exec` is the smallest thing that proves a sysroot and a link line work at all.
 
+**The sysroots.** `sysroots/manifest` pins the libc source with a hash, the same way the toolchains are pinned, and `bin/sysroot` builds one for a target and writes the record of what went into it. This is the producer that `rucc-sysroot` in the compiler repository deliberately does not contain, because fetching needs a cache, a provenance record and a network policy, and a crate the compiler links against should have none of those.
+
 ## Using it
 
 ```
@@ -24,6 +26,8 @@ bin/facts --all                 what the reference says about every target's sca
 bin/facts --check               fail if anything in facts/ has drifted
 bin/compile-corpus              compile the layout corpus for all forty two targets
 bin/run-corpus                  build and run the executing corpus under qemu
+bin/sysroot aarch64-linux-musl  produce a musl sysroot, with a manifest
+bin/sysroot --check a b         compare two manifests, which is the reproducibility check
 bin/lint                        the house rules
 ```
 
@@ -33,7 +37,7 @@ The download cache is `$RUCC_CROSS_CACHE`, which defaults to `~/.cache/rucc-cros
 
 ## What it has found so far
 
-The corpus earns its keep by being wrong in public. Five things, each of which was a plausible belief before the reference rejected it.
+The corpus earns its keep by being wrong in public. Six things, each of which was a plausible belief before the reference rejected it.
 
 **Plain `char` is unsigned on s390x.** It was written down as signed, in with x86. The s390x ELF ABI says unsigned, and clang agrees, and the target had never been compiled for.
 
@@ -45,7 +49,9 @@ The corpus earns its keep by being wrong in public. Five things, each of which w
 
 **`__int128` is not a 64-bit only type.** wasm32 has it and so does `x86_64-linux-gnux32`, both with four byte pointers, which is a useful reminder that the pointer width and the widest integer are separate facts.
 
-The first two were bugs in `rucc-tuple` and `rucc-abi` and are fixed. The last three were bugs in this corpus, and the comments in `corpus/layout/scalars.c` say so where they happened.
+**A sysroot built on a mac and a sysroot built on a Linux box were different files with identical instructions.** The 219 headers matched on the first try and the six compiled artifacts did not, because clang writes the working directory into `DW_AT_comp_dir` of every object it produces, including the ones assembled from `.s` files, and `/Users/apple/...` is not `/home/tam/...`. `bin/sysroot` passes `-fdebug-compilation-dir=.` and `-ffile-prefix-map` for that reason, and with them all four musl targets reproduce byte for byte across the two hosts.
+
+The first two were bugs in `rucc-tuple` and `rucc-abi` and are fixed. The next three were bugs in this corpus, and the comments in `corpus/layout/scalars.c` say so where they happened. The last one is why `bin/sysroot` has two flags in it that look like noise and are not.
 
 ## Layout
 
