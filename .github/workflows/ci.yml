@@ -112,6 +112,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
       - name: cache the toolchains
         uses: actions/cache@v4.3.0
         with:
@@ -125,6 +130,14 @@ jobs:
         run: qemu-x86_64 --version
       - name: build and run
         run: ./bin/run-corpus
+      # The signature corpus, built with the reference on both sides and run on every architecture
+      # that has a runner. It is the control build of the four in section 14.3 and not the
+      # differential, because the other three need rucc to emit code for the target. Running the
+      # control on its own is what characterizes each architecture's emulator, which is what
+      # section 14.4's divergence list is made of, and it catches the corpus bugs that compiling
+      # cannot see.
+      - name: run the signature corpus under qemu too
+        run: ./bin/run-abi-signatures rucc/tests/abi-signatures
 
   # A single required check, so branch protection does not have to list every job above.
   ci:
