@@ -1,0 +1,93 @@
+#!/bin/sh
+# Compile the two halves of the compiler's signature corpus against the reference, for every target.
+#
+# usage: bin/compile-abi-signatures [directory]
+#
+# The directory holds the output of `cargo xtask abi-signatures` in the compiler repository, which
+# is one program in four files. It defaults to $RUCC_ABI_SIGNATURES and then to
+# ../rucc/tests/abi-signatures, which is where it is when the two repositories sit side by side.
+#
+# What this checks is narrower than what `cargo xtask differential` checks and it covers far more
+# targets. The differential harness compiles the two halves with two different compilers, links
+# them and runs the program, and it can only do that where there is a back end and a way to run the
+# result, which today is one row. This compiles both halves for every row, and all it can say is
+# that the corpus is C the reference accepts for that target. That is worth having on its own: the
+# corpus is generated, the grammar behind it grows, and a shape that is fine on x86-64 and is a
+# constraint violation on s390x should be found the day it is added rather than the day somebody
+# builds a back end.
+#
+# report.c is not compiled here. It is the one file of the four that includes a libc header, it is
+# always built by the reference compiler in the harness, and asking a freestanding row for stdio.h
+# would fail for a reason that has nothing to do with the corpus. caller.c and callee.c include
+# nothing but abi.h, which is why they can be compiled for every row the same way.
+#
+# A target whose spelling the current reference does not have is skipped and counted, rather than
+# compiled against a neighbour. The count is printed, because a corpus that quietly stopped
+# checking half its targets looks exactly like one that passes.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+reference=${RUCC_CROSS_REFERENCE:-zig}
+
+corpus=${1:-${RUCC_ABI_SIGNATURES:-$here/../rucc/tests/abi-signatures}}
+if [ ! -d "$corpus" ]; then
+	printf 'abi-signatures: %s is not a directory\n' "$corpus" >&2
+	printf 'abi-signatures: generate it with "cargo xtask abi-signatures" in the compiler repository\n' >&2
+	exit 1
+fi
+for name in abi.h caller.c callee.c; do
+	if [ ! -f "$corpus/$name" ]; then
+		printf 'abi-signatures: %s has no %s in it\n' "$corpus" "$name" >&2
+		exit 1
+	fi
+done
+
+column=2
+[ "$reference" = zig ] || column=3
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT INT TERM
+
+passed=0
+failed=0
+skipped=0
+skipped_names=
+
+while IFS='	' read -r tuple zig gcc runner; do
+	case $tuple in '#'*|'') continue ;; esac
+	[ -n "$runner" ] || continue
+	spelling=$zig
+	[ "$column" = 2 ] || spelling=$gcc
+	if [ "$spelling" = "-" ]; then
+		skipped=$((skipped + 1))
+		skipped_names="$skipped_names $tuple"
+		continue
+	fi
+	ok=yes
+	for half in caller callee; do
+		# `-c` and nothing else, for the reason compile-abi-corpus gives: neither half asks for a
+		# libc, so a freestanding row is checked exactly the same way a hosted one is.
+		"$here/bin/reference-cc" "$tuple" -std=c17 -Wall -Wextra -Werror \
+			-I "$corpus" -c -o "$out/$tuple.$half.o" "$corpus/$half.c" \
+			2>"$out/$tuple.$half.log" || ok=no
+	done
+	if [ "$ok" = yes ]; then
+		passed=$((passed + 1))
+	else
+		failed=$((failed + 1))
+		printf '%s: the signature corpus did not compile\n' "$tuple" >&2
+		for half in caller callee; do
+			[ -s "$out/$tuple.$half.log" ] || continue
+			sed 's/^/    /' "$out/$tuple.$half.log" >&2
+		done
+	fi
+done < "$here/targets"
+
+if [ "$skipped" -gt 0 ]; then
+	printf 'abi-signatures:%s have no %s spelling and were skipped\n' \
+		"$skipped_names" "$reference" >&2
+fi
+printf 'abi-signatures: %d compiled, %d failed, %d skipped, against %s\n' \
+	"$passed" "$failed" "$skipped" "$reference" >&2
+[ "$failed" -eq 0 ] && [ "$passed" -gt 0 ]
