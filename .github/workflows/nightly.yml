@@ -97,6 +97,10 @@ jobs:
         env:
           RUCC_CROSS_REFERENCE: gcc
         run: ./bin/compile-abi-corpus rucc/tests/abi-corpus
+      - name: the compiler's signature corpus
+        env:
+          RUCC_CROSS_REFERENCE: gcc
+        run: ./bin/compile-abi-signatures rucc/tests/abi-signatures
       - name: the executing corpus
         env:
           RUCC_CROSS_REFERENCE: gcc

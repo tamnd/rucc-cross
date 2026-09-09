@@ -26,6 +26,7 @@ bin/facts --all                 what the reference says about every target's sca
 bin/facts --check               fail if anything in facts/ has drifted
 bin/compile-corpus              compile the layout corpus for all forty two targets
 bin/compile-abi-corpus          compile the compiler's generated layout corpus, one file per target
+bin/compile-abi-signatures      compile the compiler's generated signature corpus, for every target
 bin/run-corpus                  build and run the executing corpus under qemu
 bin/sysroot aarch64-linux-musl  produce a musl sysroot, with a manifest
 bin/sysroot --check a b         compare two manifests, which is the reproducibility check
@@ -33,6 +34,8 @@ bin/lint                        the house rules
 ```
 
 `bin/compile-abi-corpus` is the one that reads the other repository. It takes the directory `cargo xtask abi-corpus` writes, which defaults to `../rucc/tests/abi-corpus` and can be given as an argument or in `RUCC_ABI_CORPUS`, and compiles each file for the target it is named after. The difference from `bin/compile-corpus` is what the C is: that one is C somebody wrote here, this one is C the compiler generated, and every line of it is a `_Static_assert` about a size, an alignment or a member offset that came out of `rucc_types::layout_record`. So a failure is not a corpus that will not build, it is the compiler and the reference disagreeing about a record, and the assertion that failed names it.
+
+`bin/compile-abi-signatures` reads the other repository too, and it answers a smaller question than its name suggests. The corpus it takes is one program in four files, written by `cargo xtask abi-signatures`, whose two halves are meant to be compiled by two different compilers and linked together so that a value arriving in the wrong register has somewhere to show up. Running it that way needs a back end and a way to execute the result, so the compiler repository does that on the one target it can. What happens here is that both halves are compiled for every row of the table, and all that says is that the corpus is C the reference accepts everywhere. That is worth a job on its own, because the corpus is generated and the grammar behind it grows, and a shape that is fine on x86-64 and a constraint violation on s390x should turn up the day it is added rather than the day somebody writes a back end. `report.c` is left out of it: it is the one file of the four that includes a libc header, and asking a freestanding row for `stdio.h` would fail for a reason that has nothing to do with the corpus.
 
 Set `RUCC_CROSS_REFERENCE=gcc` to compare against the platform's cross gcc instead of zig, for the rows where one exists. That column is much sparser than the zig one and the sparseness is the argument for this whole line of work: a per target gcc has to exist as a package before you can compare against it, and for most of the table nobody has built one.
 
