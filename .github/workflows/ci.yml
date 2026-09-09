@@ -56,7 +56,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
       - name: cache the toolchains
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/rucc-cross
           key: toolchains-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest') }}
@@ -87,7 +87,7 @@ jobs:
           repository: tamnd/rucc
           path: rucc
       - name: cache the toolchains
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/rucc-cross
           key: toolchains-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest') }}
@@ -118,7 +118,7 @@ jobs:
           repository: tamnd/rucc
           path: rucc
       - name: cache the toolchains
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/rucc-cross
           key: toolchains-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest') }}
