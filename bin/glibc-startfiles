@@ -1,0 +1,701 @@
+#!/bin/sh
+# Produce glibc's start files for every glibc row of the target table, out of glibc's own build.
+#
+# usage: bin/glibc-startfiles
+#        bin/glibc-startfiles --force
+#        bin/glibc-startfiles --check <manifest> <manifest>
+#
+# The headers are the half of a sysroot that cannot be synthesized and bin/glibc-headers produces
+# them. This is the first piece of the other half. A tree of headers compiles a program and links
+# nothing, so validation 3 of section 8.4 of the compiler's sysroot specification, the one that runs
+# a program built against our tree on a real distribution image, has had nothing to run. The first
+# thing a link needs is the start file: the object that holds `_start`, sets the stack up the way the
+# ABI says the kernel left it, and calls `__libc_start_main`. Nothing links without one and no
+# compiler can generate one, because it is glibc's own code.
+#
+# Eight files per ABI, and the list is glibc's rather than ours. crt1.o starts a dynamically linked
+# program that is not position independent, Scrt1.o starts a position independent one, rcrt1.o starts
+# a static PIE, gcrt1.o and grcrt1.o are those two with profiling, Mcrt1.o is the one for -p, and
+# crti.o and crtn.o are the prologue and the epilogue of the `_init` and `_fini` functions that every
+# other object's `.init` and `.fini` pieces are wrapped in. We install what `make install-lib` in
+# glibc's csu directory installs and then check that every ABI produced the same list, which is how a
+# release that adds or drops one gets noticed rather than quietly changing what a sysroot contains.
+#
+# Out of glibc's own build, and that is the whole point. Zig compiles three files of its own bundled
+# glibc source with its own flags and links them with `ld.lld -r`, which is a recipe somebody has to
+# maintain against glibc's; we run glibc's csu makefile, so the recipe is glibc's. It is not the
+# obvious command: the top level `make csu/crt1.o` has no such rule and neither does the absolute
+# path spelling of it, because glibc's subdirectory makefiles are not reachable from the top without
+# a full build. `make -r -C <source>/csu ..=../ objdir=<build> install-lib-nosubdir` is what works,
+# and it takes about thirty seconds per ABI against the twenty minutes a build of the library is.
+#
+# What is not here is libc_nonshared.a and the stub shared objects, so this is not yet a sysroot you
+# can link against without the rest coming from somewhere. libc_nonshared.a cannot be produced this
+# way at all: its rule wants a stamp file from every subdirectory of glibc, so it needs a full build
+# per ABI, which is the same full build tamnd/rucc#941 needs for the real gnu/stubs.h. One build
+# would settle both and that is the next piece rather than this one.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-startfiles: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# Every glibc row of the target table, as the tuple, the ABI, the kernel architecture glibc is
+# configured against, and the three numbers the first twenty bytes of the produced object have to
+# say. The same nine rows bin/glibc-headers installs, without the family column, because a start file
+# is machine code and nothing about it is shared between two architectures.
+#
+# The three ELF numbers are the class, the byte order and the machine, read straight out of the
+# header. They are here because a cross build that configured itself for the wrong machine produces
+# objects that are perfectly valid and for somewhere else, and because the check costs nothing: it is
+# twenty bytes and no tool. 2 and 1 are a 64-bit little endian object, and the machine numbers are
+# the ones in the gABI, 62 for x86-64, 3 for i386, 183 for AArch64, 40 for ARM, 243 for RISC-V, 258
+# for LoongArch, 21 for 64-bit PowerPC and 22 for S/390.
+#
+# Two rows are worth reading twice. x32 is a 32-bit object for machine 62, which is the whole of what
+# that ABI is, and s390x is the one row in this table with a 2 in the byte order column, because it
+# is the one big endian machine rucc targets. tamnd/rucc#940 is open because the directory name glibc
+# headers are filed under says neither of those things.
+rows='x86_64-linux-gnu	x86_64	x86	2	1	62
+i686-linux-gnu	i386	x86	1	1	3
+x86_64-linux-gnux32	x32	x86	1	1	62
+aarch64-linux-gnu	aarch64	arm64	2	1	183
+armv7-linux-gnueabihf	arm	arm	1	1	40
+riscv64-linux-gnu	riscv64	riscv	2	1	243
+loongarch64-linux-gnu	loongarch64	loongarch	2	1	258
+powerpc64le-linux-gnu	powerpc64	powerpc	2	1	21
+s390x-linux-gnu	s390x	s390	2	2	22'
+
+# The pinned zig, read out of toolchains/manifest, the same way bin/glibc-headers reads it.
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+# Where the compiler's own headers are, which glibc has to be told rather than asked. See write_cc.
+zig_include() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/lib/include
+	[ -d "$path" ] || die "$path is not a directory, so this zig is not laid out the way 0.16 is"
+	printf '%s\n' "$path"
+}
+
+target_column() {
+	spelling=$(awk -F'\t' -v t="$1" -v c="$2" '$1 == t { print $c; exit }' "$here/targets")
+	if [ -z "$spelling" ] || [ "$spelling" = "-" ]; then
+		die "$1 has no column $2 in the targets table"
+	fi
+	printf '%s\n' "$spelling"
+}
+
+# The pinned glibc source, fetched and verified, shared by every ABI. The first glibc row of
+# sysroots/manifest and not any of the others, because the tree we ship is one release.
+glibc_source() {
+	line=$(awk -F'\t' '$1 == "glibc" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no glibc line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/glibc-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+glibc_make() {
+	for candidate in "${MAKE:-make}" gmake; do
+		command -v "$candidate" >/dev/null 2>&1 || continue
+		case $("$candidate" --version 2>/dev/null | head -1) in
+		"GNU Make "[4-9]* | "GNU Make "[1-9][0-9]*) printf '%s\n' "$candidate"; return 0 ;;
+		esac
+	done
+	die "no GNU make 4.0 or newer on the path, and glibc's build system needs one"
+}
+
+host_tools() {
+	for tool in gawk bison sed python3; do
+		command -v "$tool" >/dev/null 2>&1 ||
+			die "$tool is not on the path, and glibc's configure calls it critical"
+	done
+}
+
+# Everything under a directory, hashed, as manifest lines, in the C locale. The same function
+# bin/glibc-headers has, without the two special cases, because nothing here is patched: every byte
+# in this tree came out of glibc's own build of glibc's own source.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_licence=$3
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			printf '%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_source" "$(sha256 "$walk_file")" "$walk_licence"
+		done
+	)
+}
+
+# One kernel header directory per kernel architecture, for glibc's --with-headers. Done before
+# anything forks, for the reason bin/glibc-headers gives: three of the nine rows are x86 and three
+# jobs assembling one directory at once lose two of themselves.
+kernel_trees() {
+	for tree_karch in $(printf '%s\n' "$rows" | cut -f3 | LC_ALL=C sort -u); do
+		[ -d "$cache/kernel-headers/$tree_karch" ] ||
+			die "$cache/kernel-headers has no $tree_karch, so run bin/kernel-headers first"
+		mkdir -p "$1/kernel-$tree_karch"
+		cp -R "$cache/kernel-headers/generic/." "$1/kernel-$tree_karch/"
+		cp -R "$cache/kernel-headers/$tree_karch/." "$1/kernel-$tree_karch/"
+	done
+}
+
+# The compiler glibc's build is given, which is the pinned zig with three things done to its command
+# line. bin/glibc-headers needs one of them and compiles nothing; this compiles, and the other two
+# are what compiling costs.
+#
+# -Wno-unused-command-line-argument, because zig cc passes -c to clang itself and then a command that
+# was -S gets both and clang reports -c as unused, which any probe using -Werror turns into an error
+# about the wrong thing.
+#
+# -g0, and it goes last so that it wins over the -g in glibc's own default CFLAGS. Two hosts have to
+# produce the same bytes, and debug information is the whole of what stops that: clang writes the
+# working directory into DW_AT_comp_dir, and for these files the working directory is inside the
+# source tree, so even -ffile-prefix-map does not reach it. A start file with no debug information in
+# it is also what every distribution ships, and it is a third the size.
+#
+# Two rewrites of the command line, because glibc's build asks for two things zig 0.16 does not do.
+# It parses -MD, -MP, -MF and -MT itself rather than handing them to clang, and when -S is on the
+# same line it writes the dependency file, writes no assembly at all and exits 0, so the rule in
+# Makerules that generates a header of assembly constants stops on a missing file. A line that asks
+# for both is therefore run twice, once as it came for the dependency file and once without those
+# four for the assembly. That needs the translation unit to be readable twice, and the script that
+# asks passes it on standard input, so standard input is written to a file and the `-` replaced by it,
+# and then that name is taken back out of the dependency file. It has to come out: make restarts when
+# a dependency file it included has changed, and on the second pass a prerequisite named after a
+# temporary directory that no longer exists is a stop rather than a warning. Taking it out is also
+# what gcc does, which answers the question of what the file should say instead. Given the same
+# program on standard input it writes the headers it read and nothing for the source.
+#
+# An argument naming an existing file whose name ends in .os is copied to one ending in .o, because
+# zig cc decides what an input is from its suffix and answers "unrecognized file extension" for
+# glibc's name for an object destined for a shared library. Three of the eight start files are a
+# relocatable link of one of those, so without this nothing here builds at all.
+#
+# And two options are dropped, which are the same two the cache variables below promise. glibc asks
+# whether the compiler takes -mlong-double-128 and -mno-gnu-attribute and will not configure
+# powerpc64le or s390x without them, so the answer has to be yes, and then it puts both on every
+# command line and zig cc stops on an unknown option. Neither is a lie that reaches the output: the
+# first asks for the 128-bit long double ABI, which is the only one clang has ever had for those two
+# machines, and the second turns off assembler directives recording that ABI, which clang does not
+# write in the first place.
+write_cc() {
+	{
+		printf '#!/bin/sh\nzig=%s\ntarget=%s\n' "$2" "$3"
+		cat <<'SH'
+
+deps=
+asm=
+rewrite=
+depfile=
+previous=
+for argument in "$@"; do
+	[ "$previous" = -MF ] && depfile=$argument
+	case $argument in
+	-S) asm=yes ;;
+	-MD | -MP | -MF | -MT) deps=yes ;;
+	-mlong-double-128 | -mno-gnu-attribute) rewrite=yes ;;
+	*.os) [ -f "$argument" ] && rewrite=yes ;;
+	esac
+	previous=$argument
+done
+
+if [ -z "$rewrite" ] && { [ -z "$deps" ] || [ -z "$asm" ]; }; then
+	exec "$zig" cc -target "$target" -Wno-unused-command-line-argument "$@" -g0
+fi
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+count=$#
+index=0
+copied=0
+previous=
+while [ "$index" -lt "$count" ]; do
+	argument=$1
+	original=$1
+	shift
+	index=$((index + 1))
+	if [ "$previous" = -o ]; then
+		:
+	elif [ "$argument" = - ]; then
+		cat >"$tmp/stdin.c"
+		argument=$tmp/stdin.c
+	else
+		case $argument in
+		-mlong-double-128 | -mno-gnu-attribute)
+			continue
+			;;
+		*.os)
+			if [ -f "$argument" ]; then
+				copied=$((copied + 1))
+				cp "$argument" "$tmp/$copied-$(basename "$argument" .os).o"
+				argument=$tmp/$copied-$(basename "$argument" .os).o
+			fi
+			;;
+		esac
+	fi
+	set -- "$@" "$argument"
+	previous=$original
+done
+
+if [ -n "$deps" ] && [ -n "$asm" ]; then
+	"$zig" cc -target "$target" -Wno-unused-command-line-argument "$@" -g0 || exit $?
+	if [ -f "$tmp/stdin.c" ] && [ -n "$depfile" ] && [ -f "$depfile" ]; then
+		sed -e "s| $tmp/stdin.c||g" -e "\\|^$tmp/stdin.c:\$|d" "$depfile" >"$tmp/deps" &&
+			cat "$tmp/deps" >"$depfile"
+	fi
+	count=$#
+	index=0
+	while [ "$index" -lt "$count" ]; do
+		argument=$1
+		shift
+		case $argument in
+		-MD | -MP)
+			index=$((index + 1))
+			continue
+			;;
+		-MF | -MT)
+			shift
+			index=$((index + 2))
+			continue
+			;;
+		esac
+		set -- "$@" "$argument"
+		index=$((index + 1))
+	done
+fi
+
+"$zig" cc -target "$target" -Wno-unused-command-line-argument "$@" -g0
+SH
+	} >"$1"
+	chmod +x "$1"
+}
+
+# One ABI: configure, build the csu directory, collect what it installed. Writes its own status file,
+# because this runs three at a time and a background job can tell the shell that started it nothing
+# except through the filesystem, and everything inside the subshell says `|| exit 1` because `set -e`
+# does not apply to a subshell on the left of an &&.
+#
+# The three cache variables are bin/glibc-headers', with the same reasons, and they matter more here
+# than they do there: the first one selects a CFLAGS addition for building the library and this does
+# build part of it. Saying no is the answer every gcc gives. The other two say yes to an option zig
+# cc does not take, and the wrapper drops both, which is written down above write_cc.
+#
+# sysincludes is overridden and that is not a detail. glibc asks the compiler where its own headers
+# are, with `-print-file-name=include`, and zig cc answers with the host gcc's directory, because
+# clang looks for an installed GCC for the target and finds the one on the machine. So a build that
+# did not override this would compile glibc's start files against /usr/lib/gcc/x86_64-linux-gnu/16's
+# stddef.h on one machine and against whatever is on the next one, which is host contamination of
+# exactly the kind section 8.5 of the sysroot specification is about. The kernel tree stays in the
+# list, because that is the other half of what configure put there.
+build_one() {
+	one_tuple=$1
+	one_abi=$2
+	one_karch=$3
+	one_work=$4
+	one_source=$5
+	one_make=$6
+	one_include=$7
+
+	(
+		one_zig=$(zig) || exit 1
+		one_zig_target=$(target_column "$one_tuple" 2) || exit 1
+		one_host=$(target_column "$one_tuple" 3) || exit 1
+
+		write_cc "$one_work/cc-$one_abi" "$one_zig" "$one_zig_target" || exit 1
+		mkdir -p "$one_work/build-$one_abi" "$one_work/lib-$one_abi" || exit 1
+		cd "$one_work/build-$one_abi" || exit 1
+		"$one_source/configure" --prefix=/usr --host="$one_host" \
+			--with-headers="$one_work/kernel-$one_karch" --disable-werror \
+			CC="$one_work/cc-$one_abi" CXX= \
+			libc_cv_cc_no_direct_extern_access=no \
+			libc_cv_mlong_double_128=yes \
+			libc_cv_no_gnu_attr_ok=yes \
+			>"$one_work/$one_abi.configure.log" 2>&1 || exit 1
+		"$one_make" -r -C "$one_source/csu" ..=../ objdir="$one_work/build-$one_abi" \
+			install_root="$one_work/install-$one_abi" \
+			sysincludes="-nostdinc -isystem $one_include -isystem $one_work/kernel-$one_karch" \
+			install-lib-nosubdir >"$one_work/$one_abi.make.log" 2>&1 || exit 1
+		# Flat, because glibc installs these into the library directory of the ABI it was
+		# configured for, which is lib64 here, lib there and libx32 for one row, and a sysroot
+		# this repository produces has one directory per ABI with the files in it.
+		find "$one_work/install-$one_abi" -type f -name '*.o' \
+			-exec cp {} "$one_work/lib-$one_abi/" ';' || exit 1
+		ls "$one_work/lib-$one_abi"/*.o >/dev/null 2>&1 || exit 1
+	) && printf 'ok\n' >"$one_work/$one_abi.status" || printf 'failed\n' >"$one_work/$one_abi.status"
+}
+
+# The first twenty bytes of an object, as numbers, so that the class, the byte order and the machine
+# can be read without a tool that knows about ELF. od is in POSIX and readelf is not on a mac.
+elf_numbers() {
+	od -A n -t u1 -N 20 "$1" | tr -s ' ' '\n' | sed '/^$/d' | tr '\n' ' '
+}
+
+# What that object says it is, as the four fields the rows table records: class, byte order, type and
+# machine. Byte 4 is the class and byte 5 the order, bytes 16 and 17 are the type and bytes 18 and 19
+# the machine, both of them two byte numbers in the object's own order.
+elf_identity() {
+	elf_numbers "$1" | awk '{
+		if ($1 != 127 || $2 != 69 || $3 != 76 || $4 != 70) { print "not-elf"; exit }
+		if ($6 == 1) { type = $17 + 256 * $18; machine = $19 + 256 * $20 }
+		else { type = 256 * $17 + $18; machine = 256 * $19 + $20 }
+		printf "%s %s %s %s\n", $5, $6, type, machine
+	}'
+}
+
+# The produced objects of one ABI against what the rows table says they have to be. A relocatable
+# object, type 1, for that class, that order and that machine, and nothing else.
+check_identity() {
+	identity_abi=$1
+	identity_dir=$2
+	identity_class=$3
+	identity_order=$4
+	identity_machine=$5
+	identity_bad=0
+
+	for identity_file in "$identity_dir"/*.o; do
+		got=$(elf_identity "$identity_file")
+		want="$identity_class $identity_order 1 $identity_machine"
+		[ "$got" = "$want" ] || {
+			say "  $(basename "$identity_file") says $got and $identity_abi wants $want"
+			identity_bad=$((identity_bad + 1))
+		}
+	done
+	[ "$identity_bad" -eq 0 ]
+}
+
+# The program the start files are checked with. Nothing in it is about the libc: a constructor that
+# has to have run before main, the three arguments the start file is the only thing that could have
+# passed, and a destructor whose own flag has to still be unset while main is running. Each failure
+# is its own exit status, because a check whose only output is "it did not work" is a check somebody
+# has to redo by hand.
+#
+# No atexit, and that is not an oversight. glibc's atexit lives in libc_nonshared.a and calls
+# __cxa_atexit with __dso_handle, which is defined by gcc's crtbegin, and -nostartfiles leaves that
+# out along with the start file being replaced. The day libc_nonshared.a is ours, this is the program
+# that grows a line.
+check_program() {
+	cat <<'EOF'
+static volatile int constructed;
+static volatile int destructed;
+
+__attribute__((constructor)) static void construct(void) { constructed = 1; }
+__attribute__((destructor)) static void destruct(void) { destructed = 1; }
+
+int main(int argc, char **argv, char **envp)
+{
+	if (!constructed)
+		return 2;
+	if (argc < 1 || argv == 0 || argv[0] == 0)
+		return 3;
+	if (envp == 0)
+		return 4;
+	return destructed ? 5 : 0;
+}
+EOF
+}
+
+# The compiler for an ABI, which is the distribution's cross gcc for that machine if there is one and
+# this machine's own gcc if the ABI is this machine's. Deliberately not the pinned zig: `zig cc`
+# ignores -nostartfiles for a glibc target and links its own crt1.o anyway, so the link fails on a
+# duplicate __data_start and there is no way to ask it to use ours instead. A real cross gcc also
+# brings the distribution's runtime for that architecture, which is what makes running the result
+# possible at all.
+abi_cc() {
+	cc_host=$(target_column "$1" 3)
+	if command -v "$cc_host-gcc" >/dev/null 2>&1; then
+		printf '%s\n' "$cc_host-gcc"
+	elif [ "$cc_host" = "$(cc_multiarch "$cc_host")" ] && command -v gcc >/dev/null 2>&1; then
+		printf '%s\n' gcc
+	else
+		printf '\n'
+	fi
+}
+
+cc_multiarch() {
+	if command -v "$1-gcc" >/dev/null 2>&1; then
+		"$1-gcc" -print-multiarch 2>/dev/null
+	elif command -v gcc >/dev/null 2>&1; then
+		gcc -print-multiarch 2>/dev/null
+	fi
+}
+
+# Link the check program three ways against one ABI's start files and run what can be run. Four of
+# the eight files are covered: Scrt1.o on its own, which is what a dynamically linked PIE needs and
+# what zig's own glibc link line uses, Scrt1.o with crti.o and crtn.o around the program, and crt1.o
+# the same way without position independence. The other four are not linked here and the reasons are
+# all the same reason. rcrt1.o is for a static PIE and there is no static glibc to link one against
+# until the full build exists, and Mcrt1.o, gcrt1.o and grcrt1.o are the profiling ones, which pull
+# in atexit and therefore gcc's crtbegin for __dso_handle. Those four are produced, their identity is
+# checked, and nothing here claims more than that about them.
+link_and_run() {
+	link_tuple=$1
+	link_abi=$2
+	link_dir=$3
+	link_work=$4
+	link_cc=$5
+	link_runner=$6
+	link_prefix=$(target_column "$link_tuple" 3)
+	link_bad=0
+	link_source=$link_work/check-$link_abi.c
+
+	check_program >"$link_source"
+	for shape in pie pie-init no-pie; do
+		binary=$link_work/check-$link_abi-$shape
+		case $shape in
+		pie) set -- "$link_dir/Scrt1.o" "$link_source" ;;
+		pie-init) set -- "$link_dir/Scrt1.o" "$link_dir/crti.o" "$link_source" "$link_dir/crtn.o" ;;
+		no-pie) set -- -no-pie "$link_dir/crt1.o" "$link_dir/crti.o" "$link_source" "$link_dir/crtn.o" ;;
+		esac
+
+		if ! "$link_cc" -nostartfiles -o "$binary" "$@" >"$link_work/$link_abi.link.log" 2>&1; then
+			printf '%-14s %-9s did not link with %s\n' "$link_abi" "$shape" "$link_cc"
+			sed 's/^/    /' "$link_work/$link_abi.link.log" >&2
+			link_bad=$((link_bad + 1))
+			continue
+		fi
+
+		if [ -z "$link_runner" ]; then
+			printf '%-14s %-9s linked, and this machine cannot run it\n' "$link_abi" "$shape"
+			continue
+		fi
+
+		# Under the emulator the target's loader and its shared libc have to be findable, and
+		# they are, in the directory the cross package put them in: linking with that gcc is
+		# what earned the right to run this at all.
+		if [ "$link_runner" = hardware ]; then
+			set -- "$binary"
+			where=hardware
+		else
+			set -- "$link_runner" -L "/usr/$link_prefix" "$binary"
+			where="under $link_runner"
+		fi
+		if "$@" >"$link_work/$link_abi.run.log" 2>&1; then
+			printf '%-14s %-9s ran and exited 0, %s\n' "$link_abi" "$shape" "$where"
+		else
+			status=$?
+			printf '%-14s %-9s exited %s, %s\n' "$link_abi" "$shape" "$status" "$where"
+			sed 's/^/    /' "$link_work/$link_abi.run.log" >&2
+			link_bad=$((link_bad + 1))
+		fi
+	done
+	[ "$link_bad" -eq 0 ]
+}
+
+# Where a binary for this ABI can be run, which is the word hardware when the row is this machine,
+# the table's emulator when there is one on the path and the distribution has the runtime for that
+# architecture, and nothing when neither. The same rule bin/run-corpus uses, with the one difference
+# that a glibc row is runnable under the emulator here: the binary was linked by the cross gcc
+# against the cross package's own libc, so the loader it names is on this disk.
+how_to_run() {
+	run_tuple=$1
+	run_prefix=$(target_column "$run_tuple" 3)
+	run_runner=$(awk -F'\t' -v t="$run_tuple" '$1 == t { print $4 }' "$here/targets")
+
+	if [ "$run_tuple" = "$native" ]; then
+		printf 'hardware\n'
+	elif [ -n "$run_runner" ] && [ "$run_runner" != "-" ] &&
+		command -v "$run_runner" >/dev/null 2>&1 && [ -d "/usr/$run_prefix/lib" ]; then
+		printf '%s\n' "$run_runner"
+	else
+		printf '\n'
+	fi
+}
+
+produce() {
+	root=$cache/glibc-startfiles
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "the glibc start files are already produced in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	[ -d "$cache/kernel-headers" ] ||
+		die "$cache/kernel-headers is not there, and glibc's configure reads the kernel's headers, so run bin/kernel-headers first"
+
+	make=$(glibc_make)
+	host_tools
+	include=$(zig_include)
+	source=$(glibc_source)
+	version=$(basename "$source" | sed 's/^glibc-//')
+	licence=$(awk -F'\t' '$1 == "glibc" { print $3; exit }' "$pins")
+
+	work=$cache/glibc-startfiles.part
+	rm -rf "$work"
+	mkdir -p "$work"
+	kernel_trees "$work"
+
+	# Three at a time, the same as bin/glibc-headers, because configure is one process on one core
+	# for a minute and a half and the build after it is eight small files.
+	running=0
+	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi karch rest; do
+		say "building the $abi start files of glibc $version"
+		build_one "$tuple" "$abi" "$karch" "$work" "$source" "$make" "$include" &
+		running=$((running + 1))
+		if [ "$running" -ge 3 ]; then
+			wait
+			running=0
+		fi
+	done
+	wait
+
+	abis=$(printf '%s\n' "$rows" | cut -f2 | tr '\n' ' ')
+	for abi in $abis; do
+		[ "$(cat "$work/$abi.status" 2>/dev/null || true)" = ok ] || {
+			tail -20 "$work/$abi.configure.log" "$work/$abi.make.log" 2>/dev/null >&2 || true
+			die "the $abi start files did not build, and the logs are in $work"
+		}
+	done
+
+	# The list is glibc's and every ABI has to agree about it, which is what catches a release that
+	# adds or drops a start file and an ABI that quietly built fewer than the others.
+	first=
+	for abi in $abis; do
+		list=$(cd "$work/lib-$abi" && printf '%s\n' *.o | LC_ALL=C sort | tr '\n' ' ')
+		if [ -z "$first" ]; then
+			first=$list
+			leader=$abi
+			continue
+		fi
+		[ "$list" = "$first" ] ||
+			die "$leader installed $first and $abi installed $list, so glibc's own list is not one list"
+	done
+	for wanted in Scrt1.o crt1.o crti.o crtn.o; do
+		case " $first" in
+		*" $wanted "*) ;;
+		*) die "glibc installed $first, which has no $wanted, and the link check needs one" ;;
+		esac
+	done
+
+	# What each object says it is, before anything is linked, because a wrong machine here is the
+	# failure that a link for the right machine would report as something else entirely.
+	bad=0
+	for abi in $abis; do
+		line=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$abi" '$2 == a { print; exit }')
+		class=$(printf '%s' "$line" | cut -f4)
+		order=$(printf '%s' "$line" | cut -f5)
+		machine=$(printf '%s' "$line" | cut -f6)
+		check_identity "$abi" "$work/lib-$abi" "$class" "$order" "$machine" || bad=$((bad + 1))
+	done
+	[ "$bad" -eq 0 ] || die "$bad of the ABIs produced an object for the wrong machine"
+
+	# Then the link, and the run where this machine can. A row with no compiler for it is skipped
+	# with the reason, the way every other script here skips one, because a skip that does not say
+	# why reads as coverage and is not.
+	for abi in $abis; do
+		tuple=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$abi" '$2 == a { print $1; exit }')
+		cc=$(abi_cc "$tuple")
+		if [ -z "$cc" ]; then
+			printf '%-14s %-9s skipped, no gcc for %s on this machine\n' \
+				"$abi" "link" "$(target_column "$tuple" 3)"
+			continue
+		fi
+		link_and_run "$tuple" "$abi" "$work/lib-$abi" "$work" "$cc" "$(how_to_run "$tuple")" ||
+			bad=$((bad + 1))
+	done
+	[ "$bad" -eq 0 ] || die "$bad of the ABIs did not link or did not run, and the work is in $work"
+
+	mkdir -p "$work/tree"
+	for abi in $abis; do
+		mkdir -p "$work/tree/$abi"
+		cp "$work/lib-$abi"/*.o "$work/tree/$abi/"
+	done
+	{
+		printf 'rucc glibc startfiles manifest 1\nglibc\t%s\n' "$version"
+		manifest_lines "$work/tree" "glibc-$version" "$licence"
+	} >"$work/tree/manifest"
+
+	rm -rf "$root"
+	mv "$work/tree" "$root"
+	rm -rf "$work"
+	files=$(printf '%s' "$first" | wc -w | tr -d ' ')
+	count=$(printf '%s' "$abis" | wc -w | tr -d ' ')
+	say "glibc $version is in $root, $files start files for each of $count ABIs, $(du -sk "$root" | cut -f1)K"
+	printf '%s\n' "$root/manifest"
+}
+
+# Compare two manifests and say what differs, which is the reproducibility check: two hosts, one
+# pinned source, one argument list, and the two records have to be the same file. This is the one
+# that the -g0 in write_cc exists for.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+# The tuple this machine is, so that a row matching it runs here rather than under the emulator. The
+# same two cases bin/run-corpus has, and the same spelling.
+machine=$(uname -m)
+case $machine in
+x86_64 | amd64) machine=x86_64 ;;
+aarch64 | arm64) machine=aarch64 ;;
+*) machine=unknown ;;
+esac
+case $(uname -s) in
+Linux) native=$machine-linux-gnu ;;
+*) native=none ;;
+esac
+
+case ${1:-} in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/glibc-startfiles --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	produce
+	;;
+"") produce ;;
+*) die "unknown argument $1" ;;
+esac

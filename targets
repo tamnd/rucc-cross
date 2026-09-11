@@ -26,6 +26,13 @@
 # the Linux targets, and a dash everywhere else, because qemu user mode runs Linux binaries and a
 # Mach-O or a PE needs a different answer. spec/cross-compile/14-testing.md section 14.6 is the
 # rule for reading a result that came from an emulator rather than from hardware.
+#
+# x32 is the one Linux row with a dash, and it used to say qemu-x86_64 until something actually tried
+# to run an x32 binary. qemu 8.2.2 installs fifty emulators and none of them is an x32 one, so
+# qemu-x86_64 gets the file and answers "Invalid ELF image for this architecture", and the kernel
+# cannot take it either: Ubuntu 24.04 ships CONFIG_X86_X32_ABI unset, so running it directly is an
+# exec format error. The ABI is still worth compiling and linking for, which is what `bin/abilist`
+# and `bin/glibc-startfiles` do with it, and nothing in this repository can run the result.
 
 x86_64-linux-gnu	x86_64-linux-gnu	x86_64-linux-gnu	qemu-x86_64
 x86_64-linux-musl	x86_64-linux-musl	-	qemu-x86_64
@@ -42,7 +49,7 @@ s390x-linux-gnu	s390x-linux-gnu	s390x-linux-gnu	qemu-s390x
 aarch64-linux-android	aarch64-linux-android	-	qemu-aarch64
 x86_64-linux-android	x86_64-linux-android	-	qemu-x86_64
 riscv64-linux-android	riscv64-linux-android	-	qemu-riscv64
-x86_64-linux-gnux32	x86_64-linux-gnux32	x86_64-linux-gnux32	qemu-x86_64
+x86_64-linux-gnux32	x86_64-linux-gnux32	x86_64-linux-gnux32	-
 aarch64-macos	aarch64-macos	-	-
 x86_64-macos	x86_64-macos	-	-
 aarch64-ios	aarch64-ios	-	-
