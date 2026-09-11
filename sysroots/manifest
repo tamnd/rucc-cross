@@ -13,8 +13,18 @@
 # what makes the comparison between the two mean anything: a difference between our sysroot and
 # zig's is then a difference in how it was built rather than in what was built.
 #
+# glibc 2.44 is here for its abilist files, which are glibc's own record of which symbol it exports
+# at which version node and are what the compiler writes its glibc stubs from. `bin/abilist` takes
+# those out of this tarball and nothing else, and the stub comparison in the compiler reads them. The
+# release is the newest one at the time it was pinned, which is deliberate: an abilist names symbols
+# up to the version it came from, the comparison drops everything above whatever the machine's own
+# libc has, and a newer description therefore costs nothing and covers every machine an older one
+# covers. M9.5 builds a glibc sysroot from this same row, which is why a libc source belongs here
+# rather than in a table of its own.
+#
 # Nothing here is fetched without a hash and nothing is fetched from a URL that is not on one of
 # these lines. `toolchains/record-hash musl 1.2.5 - <url>` downloads once and prints a line whose
 # fourth column is the hash, which is the column that belongs here, so nobody types one from memory.
 
 musl	1.2.5	mit	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	https://musl.libc.org/releases/musl-1.2.5.tar.gz
+glibc	2.44	lgpl	37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667	https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz
