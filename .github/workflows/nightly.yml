@@ -106,6 +106,53 @@ jobs:
           RUCC_CROSS_REFERENCE: gcc
         run: ./bin/run-corpus
 
+  # The kernel header tree, produced on both host architectures, and the two records held against
+  # each other. That comparison is the reproducibility criterion of tamnd/rucc#619 applied to this
+  # half of a sysroot, and it is the whole reason the job runs twice: the tree is the same text for
+  # every target, so the host it was produced on must not be able to show up in it.
+  #
+  # It is here rather than in the gate because seven `make headers_install` runs take about four and a
+  # half minutes on a runner, and nothing in this repository changes the result except the pinned
+  # source. Nothing is cached either, for the same reason: a cache hit would skip the work and then
+  # compare two copies of a file that came from the same run.
+  kernel-headers:
+    name: the kernel headers on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # Copied into the workspace rather than uploaded from the cache, because the path input of
+      # upload-artifact is a glob and not a shell, so a tilde in it is a directory named tilde.
+      - name: produce the tree
+        run: |
+          ./bin/kernel-headers
+          cp "$HOME/.cache/rucc-cross/kernel-headers/manifest" manifest
+      - name: upload the record
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: kernel-headers-${{ runner.arch }}
+          path: manifest
+
+  kernel-headers-reproducible:
+    name: the same kernel headers on two hosts
+    needs: kernel-headers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: download both records
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: records
+      - name: they have to be the same file
+        run: ./bin/kernel-headers --check records/kernel-headers-X64/manifest records/kernel-headers-ARM64/manifest
+
   # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
   # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
   # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
@@ -154,16 +201,20 @@ jobs:
   report:
     name: nightly
     if: always()
-    needs: [drift, execute, second-opinion, real-libc]
+    needs: [drift, execute, second-opinion, real-libc, kernel-headers, kernel-headers-reproducible]
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
       # is not a bug and a gcc that disagrees with clang is a question rather than a regression, and
-      # a red mark every morning for either is a red mark people stop reading. The execution matrix
-      # and the stub comparison are ours: a symbol we promise that glibc does not have is a bug in
-      # the compiler or in the pin, and either one is somebody here fixing something.
-      - name: fail if the execution matrix or the stub comparison failed
-        if: needs.execute.result != 'success' || needs.real-libc.result != 'success'
+      # a red mark every morning for either is a red mark people stop reading. The other three are
+      # ours: a symbol we promise that glibc does not have is a bug in the compiler or in the pin, and
+      # a header tree that came out different on two hosts is a bug in how it is produced. Either one
+      # is somebody here fixing something.
+      - name: fail if one of ours failed
+        if: >-
+          needs.execute.result != 'success' || needs.real-libc.result != 'success'
+          || needs.kernel-headers.result != 'success'
+          || needs.kernel-headers-reproducible.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"

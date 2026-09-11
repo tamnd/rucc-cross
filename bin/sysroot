@@ -19,6 +19,11 @@
 # a target needs byte identical inputs for it first, and this is the part that has to hold before
 # any claim about the compiler's output is worth measuring.
 #
+# This is the libc's half. bin/kernel-headers is the other one, and a Linux target needs both: three
+# of musl's installed headers and thirty one of glibc's include one of the kernel's, so a program
+# that includes sys/soundcard.h fails against a sysroot this alone produced. The two are separate
+# commands because the kernel tree is one tree for every target and this one is per target.
+#
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced sysroot
 # survives a branch switch. Producing one that is already there is a no-op unless --force is given.
 
