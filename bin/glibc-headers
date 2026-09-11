@@ -67,10 +67,13 @@ sha256() {
 # failure with the differing files named. The kernel architecture is the fourth naming, and
 # bin/kernel-headers has that whole list with the reasons.
 #
-# powerpc64le's directory is called powerpc, which is what header_family answers, and that name says
-# neither the word size nor the byte order. It is fine while every Linux row in the table is little
-# endian and it is wrong the day one is not, because `bits/endian.h` is per architecture and the two
-# orders install different text into it. tamnd/rucc#940 is where that gets fixed.
+# powerpc64le's directory is called powerpcle and a big endian powerpc row's would be called powerpc,
+# because powerpc is the one family whose two orders do not install the same text. Measured the same
+# way the check below works: install the headers for both orders and diff the installs. For aarch64
+# that is 474 files each and an empty diff. For powerpc it is 474 files each and one file that
+# differs, `bits/long-double.h`, because little endian powerpc can redirect `long double` to the
+# float128 ABI and big endian powerpc cannot. The width is in neither name, powerpc included, since
+# 32-bit against 64-bit powerpc with the order held fixed is an empty diff as well. tamnd/rucc#940.
 rows='x86_64-linux-gnu	x86_64	x86	x86
 i686-linux-gnu	i386	x86	x86
 x86_64-linux-gnux32	x32	x86	x86
@@ -78,7 +81,7 @@ aarch64-linux-gnu	aarch64	aarch64	arm64
 armv7-linux-gnueabihf	arm	arm	arm
 riscv64-linux-gnu	riscv64	riscv	riscv
 loongarch64-linux-gnu	loongarch64	loongarch	loongarch
-powerpc64le-linux-gnu	powerpc64	powerpc	powerpc
+powerpc64le-linux-gnu	powerpc64	powerpcle	powerpc
 s390x-linux-gnu	s390x	s390x	s390'
 
 # The pinned zig, read out of toolchains/manifest, the same way bin/sysroot reads it.
