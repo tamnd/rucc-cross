@@ -3,9 +3,10 @@
 #
 # usage: toolchains/install <tool>...
 #
-# Tools: zig, qemu, gcc-cross. The first is a hash pinned tarball from toolchains/manifest and the
-# other two come from the platform's package manager, for the reason written at the top of that
-# file. Running this twice is cheap, because a toolchain that is already unpacked is left alone.
+# Tools: zig, qemu, gcc-cross, gcc-cross-x86. The first is a hash pinned tarball from
+# toolchains/manifest and the others come from the platform's package manager, for the reason written
+# at the top of that file. Running this twice is cheap, because a toolchain that is already unpacked
+# is left alone.
 #
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. It is outside the
 # checkout on purpose, so that switching branches does not throw away a gigabyte of downloads.
@@ -102,6 +103,16 @@ install_packaged() {
 		apt="gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu gcc-powerpc64le-linux-gnu gcc-s390x-linux-gnu gcc-arm-linux-gnueabihf gcc-mingw-w64-x86-64"
 		brew=""
 		;;
+	# The other two ABIs of an x86 machine. Separate from gcc-cross because these two are the only
+	# rows of the table whose cross packages Ubuntu builds for an amd64 host only, and because the
+	# thing wanted from them is not the compiler: each one pulls in a libc6-dev-*-cross, which is the
+	# distribution's own header tree for that ABI, and bin/glibc-distribution compares against it.
+	gcc-cross-x86)
+		[ "$(uname -m)" = x86_64 ] ||
+			die "gcc-cross-x86 is packaged for an x86_64 host only, and this is a $(uname -m)"
+		apt="gcc-i686-linux-gnu gcc-x86-64-linux-gnux32"
+		brew=""
+		;;
 	*) die "unknown tool $tool" ;;
 	esac
 
@@ -125,7 +136,7 @@ install_packaged() {
 for tool in "$@"; do
 	case $tool in
 	zig) install_pinned zig ;;
-	qemu | gcc-cross) install_packaged "$tool" ;;
+	qemu | gcc-cross | gcc-cross-x86) install_packaged "$tool" ;;
 	*) die "unknown tool $tool, and toolchains/manifest lists what there is" ;;
 	esac
 done

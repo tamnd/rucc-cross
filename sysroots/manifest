@@ -13,6 +13,13 @@
 # what makes the comparison between the two mean anything: a difference between our sysroot and
 # zig's is then a difference in how it was built rather than in what was built.
 #
+# There are two glibc rows, and the order matters: the first one is the pin, and every later one is a
+# release fetched by version for a comparison. `bin/glibc-headers` and `bin/abilist` take the first
+# glibc row and nothing else, because the tree we ship and the symbol list we generate stubs from are
+# one release. `bin/glibc-distribution` asks for a version by name instead, which is the version the
+# machine it runs on ships, because a comparison between two different releases of glibc says nothing
+# and Ubuntu 24.04 is glibc 2.39.
+#
 # glibc 2.44 is here for its abilist files, which are glibc's own record of which symbol it exports
 # at which version node and are what the compiler writes its glibc stubs from. `bin/abilist` takes
 # those out of this tarball and nothing else, and the stub comparison in the compiler reads them. The
@@ -37,4 +44,5 @@
 
 musl	1.2.5	mit	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	https://musl.libc.org/releases/musl-1.2.5.tar.gz
 glibc	2.44	lgpl	37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667	https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz
+glibc	2.39	lgpl	f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926	https://ftp.gnu.org/gnu/glibc/glibc-2.39.tar.xz
 linux	6.19	gpl-2.0-with-linux-syscall-note	303079a8250b8f381f82b03f90463d12ac98d4f6b149b761ea75af1323521357	https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.19.tar.xz

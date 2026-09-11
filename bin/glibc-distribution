@@ -1,0 +1,414 @@
+#!/bin/sh
+# Hold upstream glibc's installed headers against the distribution's own, at the version the
+# distribution ships.
+#
+# usage: bin/glibc-distribution
+#        bin/glibc-distribution <abi>...
+#
+# This is the comparison section 8.4 of the compiler's sysroot specification asks for, done as a
+# byte comparison rather than as a list of sizes and offsets. Identical text is a stronger statement
+# than identical layout, because it covers every macro, every conditional and every type at once,
+# and a header that is the same file cannot disagree about anything. What it cannot do is tell you
+# that a difference does not matter, which is why every file that differs has to be named here with
+# the reason rather than counted.
+#
+# What it does, for each glibc ABI in the table that this machine has a header tree for: install
+# upstream glibc's headers for it, the way bin/glibc-headers does, at the version this machine's own
+# libc is, and compare every installed file against the distribution's copy. A file that is not
+# identical and not in sysroots/distribution-patches is a failure with the diff printed.
+#
+# The version comes from the machine rather than from the pin, because the pin is the newest release
+# and a distribution ships an older one. That is the whole reason this is a separate command: a
+# comparison between two different releases of glibc says nothing, so the source fetched here is the
+# one the distribution is, and sysroots/manifest has a row for it.
+#
+# What is being validated is the recipe and not the pinned tree. `make install-headers` with
+# install-bootstrap-headers=yes is a shortcut around a full build, the two configure probes it skips
+# and the cache variables that skip them are ours, and the question this answers is whether what
+# comes out is the text a distribution ships. The pinned tree gets the other two checks instead: it
+# reassembles, and two hosts produce it identically.
+#
+# The kernel headers have to exist first, the same as for bin/glibc-headers, so run that first.
+#
+# The compiler is the distribution's own gcc for the row where there is one, rather than the pinned
+# zig, because glibc releases older than about 2.41 refuse to configure with clang at all: 2.39 stops
+# on the compiler version check, and then on a builtin redirection probe, and then on SVE for
+# aarch64, IBM long double for powerpc64 and __builtin_tbegin for s390x. Where gcc is missing or
+# cannot configure the row, the pinned zig is tried with the cache variables that get past those
+# probes, and the comparison says which compiler each row used. Either is fair here, because
+# bin/glibc-headers already measured that the installed text is the same from both.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+patches=$here/sysroots/distribution-patches
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-distribution: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# Every glibc row of the target table, as the tuple, the ABI and the kernel architecture glibc is
+# configured against. The same rows bin/glibc-headers installs, without the family column, because
+# nothing here is split: each install is compared against the tree the distribution ships for that
+# ABI and the families are a fact about how the result is stored rather than about this comparison.
+rows='x86_64-linux-gnu	x86_64	x86
+i686-linux-gnu	i386	x86
+x86_64-linux-gnux32	x32	x86
+aarch64-linux-gnu	aarch64	arm64
+armv7-linux-gnueabihf	arm	arm
+riscv64-linux-gnu	riscv64	riscv
+loongarch64-linux-gnu	loongarch64	loongarch
+powerpc64le-linux-gnu	powerpc64	powerpc
+s390x-linux-gnu	s390x	s390'
+
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+target_column() {
+	spelling=$(awk -F'\t' -v t="$1" -v c="$2" '$1 == t { print $c; exit }' "$here/targets")
+	if [ -z "$spelling" ] || [ "$spelling" = "-" ]; then
+		die "$1 has no column $2 in the targets table"
+	fi
+	printf '%s\n' "$spelling"
+}
+
+# The glibc this machine's own libc is, as two numbers. ldd is part of glibc and prints its own
+# version, which is the one the headers in /usr/include came from.
+distribution_glibc() {
+	command -v ldd >/dev/null 2>&1 || die "there is no ldd here, so this machine's libc is not glibc"
+	version=$(ldd --version 2>/dev/null | head -1 | sed 's/.* //')
+	case $version in
+	2.[0-9]*) printf '%s\n' "$version" ;;
+	*) die "ldd --version says $version, which is not a glibc release number" ;;
+	esac
+}
+
+# The distribution itself, as one word, which is the key into sysroots/distribution-patches. A
+# patched header is the distribution's decision and the release it was made in, so ubuntu-24.04 is
+# the name rather than ubuntu.
+distribution_name() {
+	[ -f /etc/os-release ] || die "there is no /etc/os-release here, so the distribution has no name"
+	name=$(awk -F= '$1 == "ID" { gsub(/"/, "", $2); print $2 }' /etc/os-release)
+	release=$(awk -F= '$1 == "VERSION_ID" { gsub(/"/, "", $2); print $2 }' /etc/os-release)
+	[ -n "$name" ] && [ -n "$release" ] || die "/etc/os-release has no ID and VERSION_ID"
+	printf '%s-%s\n' "$name" "$release"
+}
+
+# The source for a given release, fetched and verified against sysroots/manifest, which has a row
+# per glibc version for exactly this reason. Nothing is fetched without a hash and nothing is
+# fetched from a URL that is not on one of those rows.
+glibc_source() {
+	line=$(awk -F'\t' -v v="$1" '$1 == "glibc" && $2 == v { print; exit }' "$pins")
+	[ -n "$line" ] ||
+		die "this machine's libc is glibc $1 and sysroots/manifest has no glibc $1 row, so add one with toolchains/record-hash"
+
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/glibc-$1
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+glibc_make() {
+	for candidate in "${MAKE:-make}" gmake; do
+		command -v "$candidate" >/dev/null 2>&1 || continue
+		case $("$candidate" --version 2>/dev/null | head -1) in
+		"GNU Make "[4-9]* | "GNU Make "[1-9][0-9]*) printf '%s\n' "$candidate"; return 0 ;;
+		esac
+	done
+	die "no GNU make 4.0 or newer on the path, and glibc's build system needs one"
+}
+
+host_tools() {
+	for tool in gawk bison sed python3; do
+		command -v "$tool" >/dev/null 2>&1 ||
+			die "$tool is not on the path, and glibc's configure calls it critical"
+	done
+}
+
+# The same copies bin/glibc-headers makes, and made before anything forks for the same reason: three
+# of the nine rows are x86 and three jobs assembling one directory at once lose two of themselves.
+kernel_trees() {
+	for tree_karch in $(printf '%s\n' "$rows" | cut -f3 | LC_ALL=C sort -u); do
+		[ -d "$cache/kernel-headers/$tree_karch" ] ||
+			die "$cache/kernel-headers has no $tree_karch, so run bin/kernel-headers first"
+		mkdir -p "$1/kernel-$tree_karch"
+		cp -R "$cache/kernel-headers/generic/." "$1/kernel-$tree_karch/"
+		cp -R "$cache/kernel-headers/$tree_karch/." "$1/kernel-$tree_karch/"
+	done
+}
+
+# Where the distribution keeps its own headers for an ABI, and what it calls the architecture in a
+# path. Debian and Ubuntu put a cross tree under /usr/<prefix>/include and the host's own under
+# /usr/include, with the per architecture part of the host's tree one directory deeper, in
+# /usr/include/<multiarch>. The multiarch name is a fifth naming of the same machine and not one of
+# the four already in the table: the i686 cross tree calls itself i386-linux-gnu, so it is asked for
+# rather than derived, and gcc prints it.
+distribution_tree() {
+	prefix=$(target_column "$1" 3)
+	if [ -d "/usr/$prefix/include" ]; then
+		printf '%s\n' "/usr/$prefix/include"
+	elif [ "$(cc_multiarch "$prefix")" = "$prefix" ]; then
+		printf '%s\n' /usr/include
+	else
+		printf '\n'
+	fi
+}
+
+cc_multiarch() {
+	if command -v "$1-gcc" >/dev/null 2>&1; then
+		"$1-gcc" -print-multiarch 2>/dev/null
+	elif command -v gcc >/dev/null 2>&1; then
+		gcc -print-multiarch 2>/dev/null
+	fi
+}
+
+# One ABI: install upstream's headers for it with the distribution's gcc where that works and the
+# pinned zig where it does not, and write down which. Three at a time, so every step says || exit 1
+# rather than trusting set -e, which does not apply inside a subshell on the left of an &&.
+install_one() {
+	one_tuple=$1
+	one_abi=$2
+	one_karch=$3
+	one_work=$4
+	one_source=$5
+	one_make=$6
+	one_host=$(target_column "$one_tuple" 3)
+
+	mkdir -p "$one_work/build-$one_abi"
+	if command -v "$one_host-gcc" >/dev/null 2>&1; then
+		one_cc=$one_host-gcc
+	elif [ "$one_host" = "$(cc_multiarch "$one_host")" ] && command -v gcc >/dev/null 2>&1; then
+		one_cc=gcc
+	else
+		one_cc=
+	fi
+
+	if [ -n "$one_cc" ] && install_with "$one_tuple" "$one_abi" "$one_karch" "$one_work" \
+		"$one_source" "$one_make" "$one_cc" gcc; then
+		printf 'ok\t%s\n' "$one_cc" >"$one_work/$one_abi.status"
+		return 0
+	fi
+
+	# The zig wrapper, with the two extra cache variables an older glibc needs on top of the three
+	# bin/glibc-headers sets. libc_cv_compiler_ok is the release's own list of minimum versions, and
+	# clang says __GNUC__ 4.2 whatever it is. libc_cv_gcc_builtin_redirection asks whether a builtin
+	# can be redirected with __asm, which clang does not support and which is a question about
+	# compiling the library rather than about installing a header.
+	rm -rf "$one_work/build-$one_abi"
+	mkdir -p "$one_work/build-$one_abi"
+	one_zig=$(zig)
+	one_zig_target=$(target_column "$one_tuple" 2)
+	printf '#!/bin/sh\nexec %s cc -target %s -Wno-unused-command-line-argument "$@"\n' \
+		"$one_zig" "$one_zig_target" >"$one_work/cc-$one_abi"
+	chmod +x "$one_work/cc-$one_abi"
+	if install_with "$one_tuple" "$one_abi" "$one_karch" "$one_work" "$one_source" "$one_make" \
+		"$one_work/cc-$one_abi" zig; then
+		printf 'ok\tzig\n' >"$one_work/$one_abi.status"
+		return 0
+	fi
+	printf 'failed\t-\n' >"$one_work/$one_abi.status"
+}
+
+install_with() {
+	with_tuple=$1
+	with_abi=$2
+	with_karch=$3
+	with_work=$4
+	with_source=$5
+	with_make=$6
+	with_cc=$7
+	with_which=$8
+	with_host=$(target_column "$with_tuple" 3)
+	with_extra=
+	[ "$with_which" = gcc ] ||
+		with_extra="libc_cv_compiler_ok=yes libc_cv_gcc_builtin_redirection=yes libc_cv_cc_no_direct_extern_access=no libc_cv_mlong_double_128=yes libc_cv_no_gnu_attr_ok=yes"
+
+	(
+		cd "$with_work/build-$with_abi" || exit 1
+		# shellcheck disable=SC2086
+		# The cache variables are a list of assignments and have to arrive as separate arguments, which
+		# is what leaving this one unquoted is for. Every value in it is written above, in this file.
+		"$with_source/configure" --prefix=/usr --host="$with_host" \
+			--with-headers="$with_work/kernel-$with_karch" --disable-werror \
+			CC="$with_cc" CXX= $with_extra \
+			>"$with_work/$with_abi.$with_which.configure.log" 2>&1 || exit 1
+		"$with_make" install-headers install_root="$with_work/install-$with_abi" \
+			install-bootstrap-headers=yes >"$with_work/$with_abi.$with_which.make.log" 2>&1 || exit 1
+	)
+}
+
+# One installed file against the distribution's copy of it. Three places to look, in this order: the
+# per architecture part of a host tree, the tree itself, and the multiarch directory a distribution
+# moves a per architecture file into, which is how finclude/math-vector-fortran.h ends up at
+# finclude/<multiarch>/math-vector-fortran.h in every one of these trees.
+distribution_copy() {
+	copy_tree=$1
+	copy_multiarch=$2
+	copy_file=$3
+	for candidate in \
+		"$copy_tree/$copy_multiarch/$copy_file" \
+		"$copy_tree/$copy_file" \
+		"$copy_tree/$(dirname "$copy_file")/$copy_multiarch/$(basename "$copy_file")"; do
+		if [ -f "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	printf '\n'
+}
+
+# Why a file is allowed to differ, out of sysroots/distribution-patches, or nothing if it is not in
+# there. A reason per distribution release per glibc version, because a patch is a decision somebody
+# made in a release and the next release may have dropped it.
+patch_reason() {
+	awk -F'\t' -v d="$1" -v v="$2" -v f="$3" \
+		'$1 == d && $2 == v && $3 == f { print $4; exit }' "$patches"
+}
+
+compare_one() {
+	cmp_abi=$1
+	cmp_tree=$2
+	cmp_multiarch=$3
+	cmp_work=$4
+	cmp_distribution=$5
+	cmp_version=$6
+	ours=$cmp_work/install-$cmp_abi/usr/include
+
+	cmp_files=0
+	cmp_same=0
+	cmp_patched=0
+	cmp_unexplained=0
+	for file in $(cd "$ours" && find . -type f | sed 's|^\./||' | LC_ALL=C sort); do
+		cmp_files=$((cmp_files + 1))
+		theirs=$(distribution_copy "$cmp_tree" "$cmp_multiarch" "$file")
+		if [ -z "$theirs" ]; then
+			say "  $file is not in $cmp_tree at all"
+			cmp_unexplained=$((cmp_unexplained + 1))
+			continue
+		fi
+		if cmp -s "$ours/$file" "$theirs"; then
+			cmp_same=$((cmp_same + 1))
+			continue
+		fi
+		reason=$(patch_reason "$cmp_distribution" "$cmp_version" "$file")
+		if [ -n "$reason" ]; then
+			cmp_patched=$((cmp_patched + 1))
+			continue
+		fi
+		say "  $file differs from $theirs and sysroots/distribution-patches has no reason for it"
+		diff "$ours/$file" "$theirs" | head -10 >&2 || true
+		cmp_unexplained=$((cmp_unexplained + 1))
+	done
+
+	say "$cmp_abi: $cmp_files files, $cmp_same identical, $cmp_patched patched by the distribution"
+	[ "$cmp_unexplained" -eq 0 ]
+}
+
+compare_all() {
+	version=$(distribution_glibc)
+	distribution=$(distribution_name)
+	source=$(glibc_source "$version")
+	make=$(glibc_make)
+	host_tools
+
+	want=$*
+	[ -n "$want" ] || want=$(printf '%s\n' "$rows" | cut -f2 | tr '\n' ' ')
+
+	work=$cache/glibc-distribution.part
+	rm -rf "$work"
+	mkdir -p "$work"
+	kernel_trees "$work"
+
+	say "this machine is $distribution with glibc $version"
+
+	# Which of the wanted rows this machine has a tree for. A row without one is not a failure: a
+	# runner has the host's headers and whichever cross packages are installed, and saying which rows
+	# were skipped is more useful than refusing to compare the ones that can be.
+	todo=
+	for abi in $want; do
+		tuple=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$abi" '$2 == a { print $1; exit }')
+		[ -n "$tuple" ] || die "$abi is not one of the glibc ABIs in the target table"
+		tree=$(distribution_tree "$tuple")
+		if [ -z "$tree" ]; then
+			say "skipping $abi, because this machine has no header tree for it"
+			continue
+		fi
+		todo="$todo $abi"
+	done
+	[ -n "$todo" ] || die "this machine has no glibc header tree for any row of the table"
+
+	running=0
+	for abi in $todo; do
+		line=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$abi" '$2 == a { print; exit }')
+		tuple=$(printf '%s' "$line" | cut -f1)
+		karch=$(printf '%s' "$line" | cut -f3)
+		say "installing upstream glibc $version for $abi"
+		install_one "$tuple" "$abi" "$karch" "$work" "$source" "$make" &
+		running=$((running + 1))
+		if [ "$running" -ge 3 ]; then
+			wait
+			running=0
+		fi
+	done
+	wait
+
+	bad=0
+	for abi in $todo; do
+		status=$(cut -f1 "$work/$abi.status" 2>/dev/null || true)
+		compiler=$(cut -f2 "$work/$abi.status" 2>/dev/null || true)
+		if [ "$status" != ok ]; then
+			say "$abi did not install with either compiler, and the logs are in $work"
+			bad=$((bad + 1))
+			continue
+		fi
+		tuple=$(printf '%s\n' "$rows" | awk -F'\t' -v a="$abi" '$2 == a { print $1; exit }')
+		tree=$(distribution_tree "$tuple")
+		multiarch=$(cc_multiarch "$(target_column "$tuple" 3)")
+		say "comparing $abi against $tree, installed with $compiler"
+		compare_one "$abi" "$tree" "$multiarch" "$work" "$distribution" "$version" || bad=$((bad + 1))
+	done
+
+	if [ "$bad" -ne 0 ]; then
+		say "$bad of the rows did not come out as the distribution's text, and the work is in $work"
+		return 1
+	fi
+	rm -rf "$work"
+	say "every row is the distribution's own text, apart from the files in sysroots/distribution-patches"
+}
+
+case ${1:-} in
+-*) die "usage: bin/glibc-distribution [<abi>...]" ;;
+*) compare_all "$@" ;;
+esac
