@@ -103,7 +103,9 @@ distribution_name() {
 	[ -f /etc/os-release ] || die "there is no /etc/os-release here, so the distribution has no name"
 	name=$(awk -F= '$1 == "ID" { gsub(/"/, "", $2); print $2 }' /etc/os-release)
 	release=$(awk -F= '$1 == "VERSION_ID" { gsub(/"/, "", $2); print $2 }' /etc/os-release)
-	[ -n "$name" ] && [ -n "$release" ] || die "/etc/os-release has no ID and VERSION_ID"
+	if [ -z "$name" ] || [ -z "$release" ]; then
+		die "/etc/os-release has no ID and VERSION_ID"
+	fi
 	printf '%s-%s\n' "$name" "$release"
 }
 
