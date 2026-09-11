@@ -106,18 +106,64 @@ jobs:
           RUCC_CROSS_REFERENCE: gcc
         run: ./bin/run-corpus
 
+  # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
+  # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
+  # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
+  # of it, and the comparison itself is a task in the compiler, because that is where the code that
+  # writes a stub is.
+  #
+  # It is here rather than in the gate for the reason the gate's own header gives: that job list is
+  # about the pinned reference toolchain and builds nothing of the compiler. This one builds two of
+  # its crates, so a morning when the compiler's main branch does not build is a morning this is red
+  # and the gate is not.
+  #
+  # Both host architectures, because there is one real libc per machine and the whole point is to
+  # compare against a real one. That makes this two architectures of coverage, which is two more than
+  # any amount of reading our own output gives.
+  real-libc:
+    name: the compiler's glibc stub against ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+            arch: x86_64
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
+      - name: record which glibc this is
+        run: ldd --version | head -1
+      - name: fetch glibc's own description of it
+        run: ./bin/abilist ${{ matrix.arch }}
+      # The default cache directory, spelled the way every other job here spells it, rather than a
+      # path this job sets for itself. Where the abilists went is bin/abilist's decision and the
+      # compiler only needs telling once.
+      - name: hold our stub against the real library
+        working-directory: rucc
+        run: RUCC_ABILISTS="$HOME/.cache/rucc-cross/abilists" cargo xtask real-libc
+
   report:
     name: nightly
     if: always()
-    needs: [drift, execute, second-opinion]
+    needs: [drift, execute, second-opinion, real-libc]
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
       # is not a bug and a gcc that disagrees with clang is a question rather than a regression, and
       # a red mark every morning for either is a red mark people stop reading. The execution matrix
-      # is ours.
-      - name: fail if the execution matrix failed
-        if: needs.execute.result != 'success'
+      # and the stub comparison are ours: a symbol we promise that glibc does not have is a bug in
+      # the compiler or in the pin, and either one is somebody here fixing something.
+      - name: fail if the execution matrix or the stub comparison failed
+        if: needs.execute.result != 'success' || needs.real-libc.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"

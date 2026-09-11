@@ -32,6 +32,7 @@ bin/run-corpus --cc rucc        the same corpus and the same transcripts, built 
 bin/rucc-cc x86_64-linux-musl   run rucc against the sysroot produced for that target
 bin/run-abi-signatures          build the signature corpus with the reference and run it under qemu
 bin/sysroot aarch64-linux-musl  produce a musl sysroot, with a manifest
+bin/abilist x86_64              extract glibc's own symbol list, for the compiler's stub comparison
 bin/sysroot --check a b         compare two manifests, which is the reproducibility check
 bin/lint                        the house rules
 ```
@@ -47,6 +48,10 @@ It is also how each architecture's emulator gets characterized, which is what th
 `bin/run-corpus --cc rucc` is the other half of the comparison, and the first thing in this repository that runs the compiler rather than the reference. `bin/rucc-cc` is how: it wants `RUCC` pointing at a compiler, it wants a sysroot already produced for the row, and it gives rucc one cache directory and the target, because `rucc-sysroot` reads the same layout under the same name that `bin/sysroot` writes. Nothing else is passed, so a header that came from the machine instead of the sysroot would be a bug in the compiler's search path and not something this script arranged around. The reference stays the default, because a transcript recorded here has to come from something other than the compiler being tested before comparing anything against it means much.
 
 It says why it skipped a row, and with `--cc rucc` two of the reasons are about the compiler: a row nobody has produced a sysroot for, and a row whose architecture has no back end yet, which is every row that is not x86-64. A static binary for the machine's own architecture and kernel runs on hardware rather than under qemu, which is how x86_64-linux-musl gets tested on an x86-64 Linux box with no emulator installed at all.
+
+`bin/abilist` fetches the pinned glibc source and takes one kind of file out of it: the abilist, which is glibc's own record of which symbol it exports at which version node, one file per architecture. That is the description the compiler writes its glibc stubs from, and `cargo xtask real-libc` over there writes a stub from it and holds it against the real `libc.so.6` on the machine, which `spec/cross-compile/09-libc-stubs.md` section 9.8 calls the highest value test in that document. The rule it checks is that the real library's symbols are a superset of ours, at the same versions, with the same sizes where there is storage to copy.
+
+It is here rather than there for the reason `bin/sysroot` is: a comparison against a real libc needs a real libc's description, the description is twenty megabytes of tarball away, and a compiler checkout should not be downloading a libc to run its own tests. Nothing is copied into this repository either, because an abilist is part of glibc and carries glibc's licence, and a pinned fetch into the cache avoids the question entirely. The nightly run does it on both host architectures, which is two real libcs, and two more than any amount of reading our own output gives.
 
 Set `RUCC_CROSS_REFERENCE=gcc` to compare against the platform's cross gcc instead of zig, for the rows where one exists. That column is much sparser than the zig one and the sparseness is the argument for this whole line of work: a per target gcc has to exist as a package before you can compare against it, and for most of the table nobody has built one.
 
@@ -78,6 +83,7 @@ The first two and the sixth were bugs in `rucc-tuple` and `rucc-abi` and all thr
 targets              how each rucc target is spelled to each tool, and what runs a binary for it
 toolchains/manifest  what we compare against, pinned with a hash
 toolchains/install   fetch and verify
+sysroots/manifest    the libc sources a sysroot or an abilist comes from, pinned the same way
 bin/                 the drivers, all POSIX sh
 corpus/layout        C that has to compile, with the reason for each assertion beside it
 corpus/abi           C that has to produce the same output everywhere
