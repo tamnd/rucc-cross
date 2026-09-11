@@ -153,6 +153,54 @@ jobs:
       - name: they have to be the same file
         run: ./bin/kernel-headers --check records/kernel-headers-X64/manifest records/kernel-headers-ARM64/manifest
 
+  # glibc's headers for all nine glibc ABIs, produced on both host architectures, and the two records
+  # held against each other. Same criterion as the kernel header job above and the same reason for
+  # running it twice, with one extra thing to catch: this one runs a configure script nine times, and a
+  # configure script is the classic way for a fact about the build machine to end up in the output.
+  #
+  # It needs the kernel headers first, because glibc's configure reads them, so the job produces both
+  # trees. That is about six minutes for the pair on a runner, which is why this is nightly and not in
+  # the gate.
+  #
+  # The glibc install is also the only thing here that wants gawk. The runner images have it, and the
+  # script says so plainly if a machine does not.
+  glibc-headers:
+    name: glibc's headers on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: produce the trees
+        run: |
+          ./bin/kernel-headers
+          ./bin/glibc-headers
+          cp "$HOME/.cache/rucc-cross/glibc-headers/manifest" manifest
+      - name: upload the record
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: glibc-headers-${{ runner.arch }}
+          path: manifest
+
+  glibc-headers-reproducible:
+    name: the same glibc headers on two hosts
+    needs: glibc-headers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: download both records
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: records
+      - name: they have to be the same file
+        run: ./bin/glibc-headers --check records/glibc-headers-X64/manifest records/glibc-headers-ARM64/manifest
+
   # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
   # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
   # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
@@ -201,7 +249,15 @@ jobs:
   report:
     name: nightly
     if: always()
-    needs: [drift, execute, second-opinion, real-libc, kernel-headers, kernel-headers-reproducible]
+    needs:
+      - drift
+      - execute
+      - second-opinion
+      - real-libc
+      - kernel-headers
+      - kernel-headers-reproducible
+      - glibc-headers
+      - glibc-headers-reproducible
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
@@ -209,12 +265,14 @@ jobs:
       # a red mark every morning for either is a red mark people stop reading. The other three are
       # ours: a symbol we promise that glibc does not have is a bug in the compiler or in the pin, and
       # a header tree that came out different on two hosts is a bug in how it is produced. Either one
-      # is somebody here fixing something.
+      # is somebody here fixing something, and the two header trees count the same way.
       - name: fail if one of ours failed
         if: >-
           needs.execute.result != 'success' || needs.real-libc.result != 'success'
           || needs.kernel-headers.result != 'success'
           || needs.kernel-headers-reproducible.result != 'success'
+          || needs.glibc-headers.result != 'success'
+          || needs.glibc-headers-reproducible.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"
