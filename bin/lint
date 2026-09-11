@@ -85,6 +85,39 @@ else
 	report "sysroots/glibc-version-changes has a record with the wrong number of fields"
 fi
 
+# The rows of one source in sysroots/manifest are in descending version order, because the first row
+# of a kind is the pin and every later one is a comparison. That is written down in the header of the
+# file and there is nothing in the format that enforces it, so a new release appended at the bottom
+# the way a new row of any other file would be leaves the pin where it was: the tree we ship and the
+# stubs we generate stay on the old release, everything still builds, and the only sign is that the
+# new release turns up in the comparison runs and nowhere else.
+if awk -F'\t' '
+	function newer(a, b) {
+		n = split(a, x, ".")
+		m = split(b, y, ".")
+		k = n > m ? n : m
+		for (i = 1; i <= k; i++) {
+			u = (i <= n ? x[i] + 0 : 0)
+			v = (i <= m ? y[i] + 0 : 0)
+			if (u != v) {
+				return u > v
+			}
+		}
+		return 0
+	}
+	/^[^#]/ && NF > 0 {
+		if ($1 in last && !newer(last[$1], $2)) {
+			print FILENAME ":" NR ": " $1 " " $2 " is not older than the " $1 " row above it, which is " last[$1]
+			bad = 1
+		}
+		last[$1] = $2
+	}
+	END { exit bad ? 1 : 0 }' sysroots/manifest; then
+	:
+else
+	report "sysroots/manifest has a source whose versions are not in descending order, and the first row of a source is the pin"
+fi
+
 # Every script is executable, because one that is not is a file somebody has to know to run with
 # sh, and they will not.
 for script in $scripts; do
