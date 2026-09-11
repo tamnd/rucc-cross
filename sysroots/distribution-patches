@@ -1,0 +1,24 @@
+# The headers a distribution ships that are not the upstream glibc release's own text, with what the
+# difference is.
+#
+# One record per line, tab separated, in this order:
+#
+#   distribution  glibc  file  what the distribution changed
+#
+# `bin/glibc-distribution` installs upstream glibc's headers at the version a machine's libc is and
+# compares every file against the distribution's copy. A file that differs and is not on one of these
+# lines is a failure, because the comparison is only worth running if every difference has a name.
+#
+# The distribution column is the ID and the VERSION_ID of /etc/os-release joined with a dash, because
+# a patch is a decision made in a release and the next release may have dropped it. The glibc column
+# is the release the distribution ships, not the release pinned in the manifest beside this file.
+#
+# Five files on Ubuntu 24.04, and the same five in every one of the eight architecture trees it ships,
+# which is what a distribution patch looks like from the outside: it is applied to the source once and
+# then every architecture's install has it.
+
+ubuntu-24.04	2.39	assert.h	wraps the declarations in an _ASSERT_H_DECLS guard so a second include does not repeat them
+ubuntu-24.04	2.39	elf.h	backports the AT_HWCAP3 and AT_HWCAP4 auxiliary vector entries from a later release
+ubuntu-24.04	2.39	features.h	drops the warning that _FORTIFY_SOURCE needs optimization, which its own default would print on every unoptimized compile
+ubuntu-24.04	2.39	paths.h	points _PATH_VARDB at /var/lib/misc rather than /var/db, which is where Debian policy puts it
+ubuntu-24.04	2.39	stdbit.h	uses the __builtin_stdc_ functions where the compiler has them rather than the library's own macros

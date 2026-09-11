@@ -49,15 +49,15 @@ for file in $markdown; do
 	fi
 done
 
-# Trailing whitespace, which matters more here than usual because the two data files are tab
-# separated and a stray tab at the end of a record is an empty field nobody can see.
-for file in $markdown targets toolchains/manifest sysroots/manifest $scripts; do
+# Trailing whitespace, which matters more here than usual because the data files are tab separated
+# and a stray tab at the end of a record is an empty field nobody can see.
+for file in $markdown targets toolchains/manifest sysroots/manifest sysroots/distribution-patches $scripts; do
 	if grep -n '[ 	]$' "$file" >/dev/null 2>&1; then
 		report "$file has trailing whitespace"
 	fi
 done
 
-# Every record in the two data files has the number of fields its header promises.
+# Every record in the data files has the number of fields its header promises.
 if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 4 { print FILENAME ":" NR ": " NF " fields, want 4"; bad = 1 } END { exit bad ? 1 : 0 }' targets; then
 	:
 else
@@ -72,6 +72,11 @@ if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 5 { print FILENAME ":" NR ": " NF " fi
 	:
 else
 	report "sysroots/manifest has a record with the wrong number of fields"
+fi
+if awk -F'\t' '/^[^#]/ && NF > 0 && NF != 4 { print FILENAME ":" NR ": " NF " fields, want 4"; bad = 1 } END { exit bad ? 1 : 0 }' sysroots/distribution-patches; then
+	:
+else
+	report "sysroots/distribution-patches has a record with the wrong number of fields"
 fi
 
 # Every script is executable, because one that is not is a file somebody has to know to run with

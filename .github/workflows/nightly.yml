@@ -201,6 +201,51 @@ jobs:
       - name: they have to be the same file
         run: ./bin/glibc-headers --check records/glibc-headers-X64/manifest records/glibc-headers-ARM64/manifest
 
+  # Upstream glibc's headers against the distribution's own, at the version the runner ships. The two
+  # jobs above ask whether our tree is reproducible and whether it reassembles, which are both
+  # questions about our own output. This one is the only job that asks whether the text is right, by
+  # holding every installed file against the copy a real distribution built from the same release.
+  #
+  # Both host architectures for the same reason real-libc runs twice: there is one distribution per
+  # machine, and the x86-64 runner compares eight ABIs where the arm64 one compares six. The x86 step
+  # is what makes that eight, and it only runs on the x86-64 runner because Ubuntu packages those two
+  # cross toolchains for an amd64 host only.
+  #
+  # A file that differs and has no line in sysroots/distribution-patches fails the run, and the fix is
+  # usually to read the distribution's patch and add the line. That is rare enough to be worth a red
+  # morning: a distribution does not change a header in a stable release very often, and when it does,
+  # that is a fact about what people's machines actually contain.
+  glibc-distribution:
+    name: upstream glibc against ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: record which distribution this is
+        run: |
+          . /etc/os-release
+          echo "$PRETTY_NAME with $(ldd --version | head -1)"
+      - name: install the cross compilers
+        run: ./toolchains/install gcc-cross
+      - name: install the other two x86 trees
+        if: runner.arch == 'X64'
+        run: ./toolchains/install gcc-cross-x86
+      # zig is the fallback compiler for a row the distribution's gcc cannot configure, which on Ubuntu
+      # 24.04 is i386, and the script says which compiler each row used.
+      - name: install zig
+        run: ./toolchains/install zig
+      - name: compare against the distribution
+        run: |
+          ./bin/kernel-headers
+          ./bin/glibc-distribution
+
   # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
   # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
   # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
@@ -258,6 +303,7 @@ jobs:
       - kernel-headers-reproducible
       - glibc-headers
       - glibc-headers-reproducible
+      - glibc-distribution
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
@@ -265,7 +311,9 @@ jobs:
       # a red mark every morning for either is a red mark people stop reading. The other three are
       # ours: a symbol we promise that glibc does not have is a bug in the compiler or in the pin, and
       # a header tree that came out different on two hosts is a bug in how it is produced. Either one
-      # is somebody here fixing something, and the two header trees count the same way.
+      # is somebody here fixing something, and the two header trees count the same way. So does the
+      # comparison against the distribution: a header that is not the distribution's text is either a
+      # patch nobody has written down yet or a recipe that stopped producing what it claims to.
       - name: fail if one of ours failed
         if: >-
           needs.execute.result != 'success' || needs.real-libc.result != 'success'
@@ -273,6 +321,7 @@ jobs:
           || needs.kernel-headers-reproducible.result != 'success'
           || needs.glibc-headers.result != 'success'
           || needs.glibc-headers-reproducible.result != 'success'
+          || needs.glibc-distribution.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"
