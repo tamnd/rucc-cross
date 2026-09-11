@@ -1,0 +1,457 @@
+#!/bin/sh
+# Produce glibc's installed headers for every glibc row of the target table, split the way
+# rucc-sysroot searches a sysroot.
+#
+# usage: bin/glibc-headers
+#        bin/glibc-headers --force
+#        bin/glibc-headers --check <manifest> <manifest>
+#
+# `make install-headers` from the glibc pinned in sysroots/manifest, once per ABI, and then one generic
+# tree and one tree per family derived by comparing those installs rather than from a list somebody
+# maintains. The check that the derivation is right is that the generic tree plus a family's tree
+# reassembles each of that family's installs byte for byte, and this script does that check every time
+# rather than trusting the rule it just applied.
+#
+# Nine installs and seven trees. The install is per ABI because the types a program gets are decided by
+# the size of a pointer and a long rather than by the instruction set, so x86_64, i386 and x32 are three
+# installs of the same sysdeps directories. The tree is per family, the name
+# `rucc_sysroot::Sysroot::header_family` gives it, because glibc's own headers read `__x86_64__` and
+# `__ILP32__` and branch on them, so one x86 tree answers all three. That is glibc's claim and the nine
+# installs are what checks it.
+#
+# The kernel headers have to exist first, because glibc's configure reads them to find out which
+# system calls the kernel has, so run bin/kernel-headers before this. This is also the first thing
+# that reassembles that tree out of its own split, which is one more check on it.
+#
+# The compiler is the pinned zig for the same reason bin/sysroot uses it: a header tree installed by
+# whatever was on the machine is a header tree nobody can reproduce. Three cache variables are set on
+# the configure line to get past probes that ask the compiler for things clang does not have, and
+# none of them can change the text that is installed, which is measured rather than assumed: seven of
+# the nine rows were installed a second time with the Debian cross gcc for that architecture and the
+# two trees are byte identical. The two rows that cannot be checked that way are i686, where Ubuntu's
+# own gcc enables CET by default and glibc refuses to configure for i386 with it on, and loongarch64,
+# which has no cross gcc in Ubuntu 24.04 at all.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced tree survives
+# a branch switch. Producing one that is already there is a no-op unless --force is given.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-headers: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# Every glibc row of the target table, as the tuple, the ABI, the directory the headers go in, and
+# the kernel architecture glibc is configured against. The tuple is the key into `targets`, which is
+# where the zig spelling and the triple glibc's config.sub wants are already written down.
+#
+# Four namings for nine rows, and they are all different. The ABI is the key for an install, because
+# nine installs happen: x86_64, i386 and x32 are one architecture and three sets of types, and which
+# set a program gets is decided by the size of a pointer and a long rather than by the instruction
+# set. The directory is `header_family` in rucc-sysroot, which is coarser than the ABI and coarser
+# than the tuple's architecture, because glibc's own headers branch on `__ILP32__` and `__x86_64__`
+# themselves, in `bits/wordsize.h`, so one x86 tree serves all three. That is glibc's claim rather
+# than ours, so the installs are held against each other below and a family whose ABIs disagree is a
+# failure with the differing files named. The kernel architecture is the fourth naming, and
+# bin/kernel-headers has that whole list with the reasons.
+#
+# powerpc64le's directory is called powerpc, which is what header_family answers, and that name says
+# neither the word size nor the byte order. It is fine while every Linux row in the table is little
+# endian and it is wrong the day one is not, because `bits/endian.h` is per architecture and the two
+# orders install different text into it. tamnd/rucc#940 is where that gets fixed.
+rows='x86_64-linux-gnu	x86_64	x86	x86
+i686-linux-gnu	i386	x86	x86
+x86_64-linux-gnux32	x32	x86	x86
+aarch64-linux-gnu	aarch64	aarch64	arm64
+armv7-linux-gnueabihf	arm	arm	arm
+riscv64-linux-gnu	riscv64	riscv	riscv
+loongarch64-linux-gnu	loongarch64	loongarch	loongarch
+powerpc64le-linux-gnu	powerpc64	powerpc	powerpc
+s390x-linux-gnu	s390x	s390x	s390'
+
+# The pinned zig, read out of toolchains/manifest, the same way bin/sysroot reads it.
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+# A column of the targets table for a tuple, so the one place a spelling is recorded stays the one
+# place. Column 2 is zig's and column 3 is the Debian prefix, which is also the triple glibc's
+# config.sub wants, since both of them are the GNU name for the machine.
+target_column() {
+	spelling=$(awk -F'\t' -v t="$1" -v c="$2" '$1 == t { print $c; exit }' "$here/targets")
+	if [ -z "$spelling" ] || [ "$spelling" = "-" ]; then
+		die "$1 has no column $2 in the targets table"
+	fi
+	printf '%s\n' "$spelling"
+}
+
+# Fetch and unpack the pinned glibc source once, shared by every architecture, and print where it
+# went. The same shape bin/sysroot uses for musl and bin/abilist uses for the same tarball: nothing
+# is fetched without a hash and nothing is fetched from a URL that is not in sysroots/manifest.
+glibc_source() {
+	line=$(awk -F'\t' '$1 == "glibc" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no glibc line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/glibc-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+# Everything under a directory, hashed, as manifest lines, in the C locale. The same function
+# bin/sysroot and bin/kernel-headers have, and the same reason: a record that carried the order a
+# directory walk returned would report a difference between two trees that are identical. The source
+# column is a function of the path here, because two files in this tree are not glibc's text as glibc
+# wrote it and the record is where that is said.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_licence=$3
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			case $walk_file in
+			generic/features.h) walk_origin="$walk_source-patched" ;;
+			*/gnu/stubs.h) walk_origin="$walk_source-stubs-prologue" ;;
+			*) walk_origin=$walk_source ;;
+			esac
+			printf '%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_origin" "$(sha256 "$walk_file")" "$walk_licence"
+		done
+	)
+}
+
+# GNU make 4.0 or newer, which glibc requires and a mac does not have. The same check
+# bin/kernel-headers makes, for the same reason.
+glibc_make() {
+	for candidate in "${MAKE:-make}" gmake; do
+		command -v "$candidate" >/dev/null 2>&1 || continue
+		case $("$candidate" --version 2>/dev/null | head -1) in
+		"GNU Make "[4-9]* | "GNU Make "[1-9][0-9]*) printf '%s\n' "$candidate"; return 0 ;;
+		esac
+	done
+	die "no GNU make 4.0 or newer on the path, and glibc's build system needs one"
+}
+
+# The programs glibc's configure calls critical, checked here rather than in the middle of the
+# seventh architecture's configure. gawk is the one a Debian or Ubuntu machine is missing, because
+# the awk there is mawk and glibc's scripts use gawk extensions.
+host_tools() {
+	for tool in gawk bison sed python3; do
+		command -v "$tool" >/dev/null 2>&1 ||
+			die "$tool is not on the path, and glibc's configure calls it critical"
+	done
+}
+
+# The kernel's headers as glibc wants to see them, which is one directory per kernel architecture
+# with linux/, asm/ and asm-generic/ in it. Putting the split back together is what the compiler does
+# with two -isystem directories, and glibc's configure takes one --with-headers, so it gets a copy.
+#
+# Done here, before anything is forked, rather than in each architecture's own job. Three of the nine
+# rows are x86, so three jobs running at once would assemble the same directory at the same time and
+# two of them would die on a file the third had just written.
+kernel_trees() {
+	for tree_karch in $(printf '%s\n' "$rows" | cut -f4 | LC_ALL=C sort -u); do
+		mkdir -p "$1/kernel-$tree_karch"
+		cp -R "$cache/kernel-headers/generic/." "$1/kernel-$tree_karch/"
+		cp -R "$cache/kernel-headers/$tree_karch/." "$1/kernel-$tree_karch/"
+	done
+}
+
+# One architecture: a compiler wrapper, configure, install. Writes its own status file, because this
+# runs three at a time and a background job cannot report anything to the shell that started it
+# except through the filesystem.
+#
+# Everything that can fail is inside the subshell and says `|| exit 1`, because a subshell on the
+# left of an && is one of the places `set -e` does not apply, in dash and in both bashes on the three
+# hosts. Without the explicit check a job whose configure failed would carry on to the install and
+# then write itself an ok.
+install_one() {
+	one_tuple=$1
+	one_dir=$2
+	one_karch=$3
+	one_work=$4
+	one_source=$5
+	one_make=$6
+
+	(
+		one_zig=$(zig) || exit 1
+		one_zig_target=$(target_column "$one_tuple" 2) || exit 1
+		one_host=$(target_column "$one_tuple" 3) || exit 1
+
+		# -Wno-unused-command-line-argument because zig cc adds -c to every invocation it makes and then
+		# clang reports it as unused whenever the command was -S, and glibc probes the compiler with
+		# -Werror -S. Without this the alias attribute probe fails and glibc stops, saying it needs a
+		# working alias attribute, about a compiler whose alias attribute works.
+		printf '#!/bin/sh\nexec %s cc -target %s -Wno-unused-command-line-argument "$@"\n' \
+			"$one_zig" "$one_zig_target" >"$one_work/cc-$one_dir" || exit 1
+		chmod +x "$one_work/cc-$one_dir" || exit 1
+		mkdir -p "$one_work/build-$one_dir" || exit 1
+		# The cache variables, with what each one is and why setting it cannot reach the installed text.
+		#
+		# libc_cv_cc_no_direct_extern_access asks whether the compiler reaches extern data through the GOT by
+		# default, by compiling with -fno-pic and reading the assembly. zig 0.16 refuses -fno-pic for every
+		# Linux target, saying the target requires position independent code, so the probe cannot run at all
+		# and glibc stops rather than guessing. Saying no is the answer every gcc gives, and what it selects
+		# is a CFLAGS addition for building the library.
+		#
+		# libc_cv_mlong_double_128 asks whether -mlong-double-128 is accepted, which is how s390x and
+		# powerpc64le ask for the 128-bit long double ABI. clang has no such option, because it has only ever
+		# had one long double for those two and it is the 128-bit one, so the answer it gives by rejecting
+		# the flag is the opposite of the truth.
+		#
+		# libc_cv_no_gnu_attr_ok asks for -mno-gnu-attribute, which is a gcc option that turns off the
+		# .gnu_attribute assembler directives recording the long double ABI of an object. clang does not
+		# write those directives at all.
+		#
+		# All three are compiler capability questions about building the library, and `make install-headers`
+		# compiles nothing. The seven row comparison against the Debian cross compilers is what makes that a
+		# measurement rather than a claim.
+		cd "$one_work/build-$one_dir" || exit 1
+		"$one_source/configure" --prefix=/usr --host="$one_host" \
+			--with-headers="$one_work/kernel-$one_karch" --disable-werror \
+			CC="$one_work/cc-$one_dir" CXX= \
+			libc_cv_cc_no_direct_extern_access=no \
+			libc_cv_mlong_double_128=yes \
+			libc_cv_no_gnu_attr_ok=yes \
+			>"$one_work/$one_dir.configure.log" 2>&1 || exit 1
+		"$one_make" install-headers install_root="$one_work/install-$one_dir" \
+			install-bootstrap-headers=yes >"$one_work/$one_dir.make.log" 2>&1 || exit 1
+	) && printf 'ok\n' >"$one_work/$one_dir.status" || printf 'failed\n' >"$one_work/$one_dir.status"
+}
+
+produce() {
+	root=$cache/glibc-headers
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "the glibc headers are already produced in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	[ -d "$cache/kernel-headers" ] ||
+		die "$cache/kernel-headers is not there, and glibc's configure reads the kernel's headers, so run bin/kernel-headers first"
+
+	make=$(glibc_make)
+	host_tools
+	source=$(glibc_source)
+	version=$(basename "$source" | sed 's/^glibc-//')
+	licence=$(awk -F'\t' '$1 == "glibc" { print $3; exit }' "$pins")
+
+	work=$cache/glibc-headers.part
+	rm -rf "$work"
+	mkdir -p "$work"
+	kernel_trees "$work"
+
+	# Three at a time. configure is one process on one core for a minute and a half, and the install
+	# after it is copying, so three of them together finish in about the time two would take on their
+	# own and the machine stays usable.
+	running=0
+	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi family karch; do
+		say "installing the $abi headers of glibc $version"
+		install_one "$tuple" "$abi" "$karch" "$work" "$source" "$make" &
+		running=$((running + 1))
+		if [ "$running" -ge 3 ]; then
+			wait
+			running=0
+		fi
+	done
+	wait
+
+	abis=$(printf '%s\n' "$rows" | cut -f2 | tr '\n' ' ')
+	families=$(printf '%s\n' "$rows" | cut -f3 | LC_ALL=C sort -u | tr '\n' ' ')
+	for abi in $abis; do
+		[ "$(cat "$work/$abi.status" 2>/dev/null || true)" = ok ] || {
+			# Or true because a job that died before it ran configure has neither log, and a tail
+			# that fails here would take the shell out with it and say nothing.
+			tail -20 "$work/$abi.configure.log" "$work/$abi.make.log" 2>/dev/null >&2 || true
+			die "the $abi headers did not install, and the logs are in $work"
+		}
+		[ -f "$work/install-$abi/usr/include/features.h" ] ||
+			die "the $abi install has no features.h, so install-headers did not install what it usually does"
+	done
+
+	# glibc's claim that one x86 tree serves x86_64, i386 and x32, checked rather than taken. The
+	# branch is in the headers themselves, `bits/wordsize.h` reading `__x86_64__` and `__ILP32__`, so
+	# three installs of the same family have to be the same text, and the compiler only has one
+	# directory per family to look in. A family whose ABIs disagree would be a tree that silently
+	# serves two of the three wrong, which is why this is a failure with the files named and not a
+	# warning.
+	for family in $families; do
+		lead=
+		for abi in $(printf '%s\n' "$rows" | awk -F'\t' -v f="$family" '$3 == f { print $2 }'); do
+			if [ -z "$lead" ]; then
+				lead=$abi
+				continue
+			fi
+			diff -r "$work/install-$lead/usr/include" "$work/install-$abi/usr/include" >"$work/$family.abis" 2>&1 ||
+				{ head -20 "$work/$family.abis" >&2 || true; die "$lead and $abi are both $family and their headers differ, so one directory cannot serve both"; }
+		done
+		printf '%s\n' "$lead" >"$work/$family.lead"
+	done
+
+	# The same rule bin/kernel-headers uses over its own tree: a header every architecture installs
+	# with identical contents goes in the shared directory, and every other header goes in the
+	# directory of each architecture that has it, which the compiler searches first. Nothing here is
+	# about bits/, even though bits/ is where most of the difference is, because eighteen headers
+	# outside it are per architecture too and sys/io.h is not a special case of anything.
+	#
+	# Over one install per family rather than over all nine, which the check above is what earns.
+	leads=
+	for family in $families; do
+		leads="$leads $(cat "$work/$family.lead")"
+	done
+	first=$(printf '%s' "$leads" | awk '{ print $1 }')
+	for abi in $leads; do
+		(cd "$work/install-$abi/usr/include" && find . -type f | sed 's|^\./||')
+	done | LC_ALL=C sort -u >"$work/paths"
+
+	mkdir -p "$work/tree/generic"
+	shared=0
+	private=0
+	while read -r file; do
+		same=yes
+		for abi in $leads; do
+			if ! cmp -s "$work/install-$first/usr/include/$file" "$work/install-$abi/usr/include/$file" 2>/dev/null; then
+				same=no
+				break
+			fi
+		done
+		if [ "$same" = yes ]; then
+			mkdir -p "$(dirname "$work/tree/generic/$file")"
+			cp "$work/install-$first/usr/include/$file" "$work/tree/generic/$file"
+			shared=$((shared + 1))
+			continue
+		fi
+		for family in $families; do
+			abi=$(cat "$work/$family.lead")
+			[ -f "$work/install-$abi/usr/include/$file" ] || continue
+			mkdir -p "$(dirname "$work/tree/$family/$file")"
+			cp "$work/install-$abi/usr/include/$file" "$work/tree/$family/$file"
+			private=$((private + 1))
+		done
+	done <"$work/paths"
+
+	# The check the whole derivation is for, over all nine installs rather than over the seven the
+	# split was derived from. Done before anything below touches the tree, so that what it compares is
+	# the rule's output and not ours, and done with diff -r rather than on the manifest so that a file
+	# in neither tree cannot pass.
+	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi family karch; do
+		rm -rf "$work/reassembled-$abi"
+		mkdir -p "$work/reassembled-$abi"
+		cp -R "$work/tree/generic/." "$work/reassembled-$abi/"
+		cp -R "$work/tree/$family/." "$work/reassembled-$abi/"
+		diff -r "$work/install-$abi/usr/include" "$work/reassembled-$abi" >"$work/$abi.reassembly" 2>&1 ||
+			{ head -20 "$work/$abi.reassembly" >&2 || true; printf 'no\n' >"$work/reassembly.failed"; }
+		rm -rf "$work/reassembled-$abi"
+	done
+	[ ! -f "$work/reassembly.failed" ] ||
+		die "generic plus a family directory is not the install it came from, so the split lost something"
+
+	# glibc defines __GLIBC_MINOR__ in features.h and the compiler defines it from the target, so one
+	# of the two has to go, and it is this one. One tree serves every release, with the differences
+	# between releases written inside the files as #if __GLIBC_PREREQ, so the release is the part that
+	# comes from the command line. Zig patches the same line out of the same file for the same reason.
+	# __GLIBC__ stays, because the major version is a property of the tree.
+	features=$work/tree/generic/features.h
+	count=$(grep -c '^#define[ 	]*__GLIBC_MINOR__[ 	]' "$features" || true)
+	[ "$count" = 1 ] ||
+		die "features.h defines __GLIBC_MINOR__ on $count lines and this patch expects exactly one"
+	sed 's|^#define[ 	]*__GLIBC_MINOR__[ 	].*$|/* __GLIBC_MINOR__ is defined by the compiler, which reads it from the target. */|' \
+		"$features" >"$features.patched"
+	mv "$features.patched" "$features"
+
+	# gnu/stubs.h, which glibc generates from a full build and install-headers therefore does not
+	# install. Every program gets it, because features.h includes it, so a tree without one compiles
+	# nothing at all. What it is missing is the list of functions that are there and fail with ENOSYS,
+	# which is a fact about the compiled library rather than about the headers, so this is glibc's own
+	# prologue with nothing appended. The cost is that a configure script asking whether chflags works
+	# is told yes, which is the permissive direction and the same shape as the compat symbol gap of
+	# tamnd/rucc#920. tamnd/rucc#941 is where the real list comes from.
+	# Counted with the rest of the per family files, because it is one of them once it is written and a
+	# count that did not match the manifest would be a count somebody has to explain every time.
+	for family in $families; do
+		mkdir -p "$work/tree/$family/gnu"
+		sed '/^@/d' "$source/include/stubs-prologue.h" >"$work/tree/$family/gnu/stubs.h"
+		private=$((private + 1))
+	done
+
+	# Its own record rather than a sysroot manifest, for the reason bin/kernel-headers has one: a
+	# sysroot manifest names the target it was produced for and this tree is every glibc target's.
+	{
+		printf 'rucc glibc headers manifest 1\nglibc\t%s\n' "$version"
+		manifest_lines "$work/tree" "glibc-$version" "$licence"
+	} >"$work/tree/manifest"
+
+	rm -rf "$root"
+	mv "$work/tree" "$root"
+	rm -rf "$work"
+	say "glibc $version is in $root, $shared headers shared and $private per family"
+	say "$(grep -c '' "$root/manifest") manifest lines, $(du -sk "$root" | cut -f1)K, \
+$(du -sk "$root/generic" | cut -f1)K of it shared"
+	printf '%s\n' "$root/manifest"
+}
+
+# Compare two manifests and say what differs, which is the reproducibility check. Two hosts, one
+# pinned source, one argument list, and the two records have to be the same file.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+case ${1:-} in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/glibc-headers --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	produce
+	;;
+"") produce ;;
+*) die "unknown argument $1" ;;
+esac
