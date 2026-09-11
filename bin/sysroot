@@ -12,7 +12,8 @@
 # What it does, for each target: fetch the pinned musl source from sysroots/manifest and verify its
 # hash, configure it against the pinned zig as the cross compiler, build it, and lay the result out
 # as include/<arch>, include/generic and lib, which is the shape `Sysroot` in that crate describes.
-# Then walk the tree, hash every file, and write the manifest.
+# Then walk the tree, hash every file, and write the manifest: version 3 of the format, six fields per
+# input, and the Linux release of the kernel tree in the cache when there is one.
 #
 # The point of it is the exit criterion of the sysroot half of tamnd/rucc#619: the same target
 # produced on two different hosts gives two manifests that are identical. Byte identical output for
@@ -109,6 +110,42 @@ musl_source() {
 	printf '%s\n' "$into"
 }
 
+# Which Linux release the kernel headers in the cache came out of, or nothing when there are none.
+#
+# Read out of the kernel tree's own record rather than out of sysroots/manifest, because the pin says
+# which release this checkout would install and the record says which one is installed. Those differ
+# for exactly as long as it takes somebody to bump the pin without running bin/kernel-headers again,
+# and the version the sysroot is produced beside is the second one.
+#
+# Nothing here installs the tree. A sysroot is produced per target and the kernel tree is produced
+# once for all of them, so the two are two commands and either can be missing while the other is
+# fine. The manifest says which it was, which is all tamnd/rucc#934 asks of it.
+kernel_release() {
+	record=$cache/kernel-headers/manifest
+	[ -f "$record" ] || return 0
+	head -1 "$record" | grep -q '^rucc kernel headers manifest ' ||
+		die "$record does not start like a kernel headers record"
+	awk -F'\t' '$1 == "linux" { print $2; exit }' "$record"
+}
+
+# Whether the bytes of one installed file can be found in the upstream release, which is the test
+# `Provenance` in rucc-sysroot applies. Bundled when they can, generated when this toolchain wrote
+# them.
+#
+# Measured rather than assumed, by hashing every file in the musl 1.2.5 release and looking up each
+# installed file's hash in that set. The answer for musl is that the library files are ours, because
+# a compiler produced them, and all 219 headers but two are upstream's byte for byte. The two are
+# bits/alltypes.h and bits/syscall.h, which musl's own build generates with sed from the .h.in files
+# of the architecture it is building for, so the bytes are in no release and the file is generated
+# the same way a merged glibc header tree is.
+provenance_of() {
+	case $1 in
+	lib/*) printf 'generated\n' ;;
+	*/bits/alltypes.h | */bits/syscall.h) printf 'generated\n' ;;
+	*) printf 'bundled\n' ;;
+	esac
+}
+
 # Everything under a directory, hashed, as manifest lines. Sorted in the C locale because that is
 # the order rucc-sysroot renders a manifest in, and a manifest that came out in the filesystem's
 # order would report a difference between two identical sysroots.
@@ -119,12 +156,14 @@ musl_source() {
 manifest_lines() {
 	walk_root=$1
 	walk_source=$2
-	walk_licence=$3
+	walk_url=$3
+	walk_licence=$4
 	(
 		cd "$walk_root" || exit 1
 		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
-			printf '%s\t%s\t%s\t%s\n' \
-				"$walk_file" "$walk_source" "$(sha256 "$walk_file")" "$walk_licence"
+			printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_source" "$walk_url" "$(sha256 "$walk_file")" \
+				"$walk_licence" "$(provenance_of "$walk_file")"
 		done
 	)
 }
@@ -143,6 +182,7 @@ produce() {
 	source=$(musl_source)
 	version=$(basename "$source" | sed 's/^musl-//')
 	licence=$(awk -F'\t' '$1 == "musl" { print $3; exit }' "$pins")
+	url=$(awk -F'\t' '$1 == "musl" { print $5; exit }' "$pins")
 	cc=$(zig)
 	triple=$(zig_target "$target")
 
@@ -196,9 +236,15 @@ produce() {
 	)
 	cp "$staging"/lib/*.o "$staging"/lib/*.a "$root.part/lib/"
 
+	# Version 3 of the format, which is the one rucc-sysroot reads: six fields per input, and a
+	# kernel line in the header when there is a kernel tree in the cache for the sysroot to have been
+	# produced beside. The line is left out rather than written empty when there is none, because a
+	# field with nothing in it reads as an answer.
+	kernel=$(kernel_release)
 	{
-		printf 'rucc sysroot manifest 1\ntarget\t%s\n' "$target"
-		manifest_lines "$root.part" "musl-$version" "$licence"
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		[ -z "$kernel" ] || printf 'kernel\t%s\n' "$kernel"
+		manifest_lines "$root.part" "musl-$version" "$url" "$licence"
 	} >"$root.part/manifest"
 
 	rm -rf "$root" "$build"
@@ -218,6 +264,12 @@ jobs_available() {
 }
 
 # Compare two manifests and say what differs, which is the check the exit criterion asks for.
+#
+# The kernel line is part of the comparison and it is the one line that can differ between two hosts
+# whose sysroots are byte identical, when one of them has a kernel tree in its cache and the other has
+# a different one or none. That is a real difference and not noise in the check: the two sysroots were
+# produced beside different system call interfaces, and a person reading the diff would rather be told
+# than have it hidden to keep the count of identical lines up.
 check() {
 	a=$1
 	b=$2
