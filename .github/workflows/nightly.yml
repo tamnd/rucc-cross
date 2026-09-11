@@ -201,20 +201,23 @@ jobs:
       - name: they have to be the same file
         run: ./bin/glibc-headers --check records/glibc-headers-X64/manifest records/glibc-headers-ARM64/manifest
 
-  # glibc's start files for all nine glibc ABIs, produced on both host architectures, and the two
-  # records held against each other. The third reproducibility job, and the first one whose output is
-  # compiled code rather than text: these are the objects every Linux link line begins with, so a
-  # difference between two hosts here is a difference in the program somebody gets.
+  # glibc's start files and libc_nonshared.a for all nine glibc ABIs, produced on both host
+  # architectures, and the two records held against each other. The third reproducibility job, and the
+  # first one whose output is compiled code rather than text: these are the objects every Linux link
+  # line begins with, so a difference between two hosts here is a difference in the program somebody
+  # gets.
   #
-  # It also links and runs. Each ABI's files are linked three ways by the distribution's cross gcc and
+  # It also links and runs. Each ABI's files are linked five ways by the distribution's cross gcc and
   # the result is executed, on hardware for the host's own row and under qemu for the others, so the
-  # job proves the objects work and not only that they hash the same. The cross compilers are therefore
-  # not optional here the way they are in the gate, and the x86 pair is x86-64 only because Ubuntu
-  # packages those two for an amd64 host. x32 is compiled and linked and never run, and the header of
-  # the targets table says why.
+  # job proves the objects work and not only that they hash the same. Two of the five link the archive,
+  # and one of those runs under -pg and has to leave a gmon.out behind, which is the profiler saying it
+  # found atexit where our archive put it. The cross compilers are therefore not optional here the way
+  # they are in the gate, and the x86 pair is x86-64 only because Ubuntu packages those two for an
+  # amd64 host. x32 is compiled and linked and never run, and the header of the targets table says why.
   #
-  # Nine configures and nine builds of glibc's csu directory are about a minute and a half, on top of
-  # the kernel headers this needs first, which is the same reason the two jobs above are nightly.
+  # Nine configures, nine builds of glibc's csu directory and nine sweeps for the archive's members are
+  # about four minutes, on top of the kernel headers this needs first, which is the same reason the two
+  # jobs above are nightly.
   glibc-startfiles:
     name: glibc's start files on ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
