@@ -1,0 +1,296 @@
+#!/bin/sh
+# Produce the Linux uapi header tree, laid out the way rucc-sysroot searches it.
+#
+# usage: bin/kernel-headers
+#        bin/kernel-headers --force
+#        bin/kernel-headers --check <manifest> <manifest>
+#
+# The other half of a Linux sysroot. bin/sysroot produces the libc's headers and its link inputs,
+# and these are the system call interface, which is the kernel's and not the libc's: 31 of glibc's
+# installed headers include <asm/...>, <asm-generic/...> or <linux/...> and 3 of musl's do, so a
+# sysroot without them does not compile sys/quota.h or net/ethernet.h. The compiler searches them as
+# two more directories after the libc's two, which is `rucc_sysroot::layout::Kernel` over there and
+# section 8.3 of spec/cross-compile/08-sysroots.md for why there are four rather than two.
+#
+# `make headers_install` is the only supported way to get them and the only reproducible one. The
+# alternative is copying include/uapi out of the source tree, which skips the unifdef pass that
+# takes the kernel internal parts out of every file, and a header tree that was never passed through
+# that is a header tree with __KERNEL__ sections in it.
+#
+# One tree for every architecture rather than one per target. Almost all of it is the same files
+# whatever the machine is, so the shared directory holds every header that is identical everywhere
+# and each architecture's directory holds only the ones that are not. Zig splits its bundled copy the
+# same way and for the same reason, which is that the alternative is nine megabytes per row of the
+# target table.
+#
+# The whole table is produced at once, and --force is how one gets produced again, because which
+# files are shared is a fact about the set of architectures rather than about any one of them. A tree
+# produced for two architectures and then extended with a third would have the first two's private
+# copies of files the third agrees with, which is a tree whose contents depend on the order somebody
+# ran this in.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced tree survives
+# a branch switch. The compiler reads kernel-headers/ under whatever RUCC_CACHE_DIR says, which is
+# the same path under the same name, so bin/rucc-cc needs no new argument for this.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "kernel-headers: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The kernel's own name for each machine, which is a third naming after the tuple's and the libc's.
+# arm64 rather than aarch64 and s390 rather than s390x, because those are the directories under
+# arch/ in the kernel source, and one directory serves both widths of x86, of riscv and of powerpc
+# the same way glibc's family does. These seven are exactly the rows
+# `rucc_sysroot::layout::kernel_arch` answers for, under the names it answers with, so the directory
+# this writes is the directory the compiler looks in without either side converting anything.
+all="x86 arm64 arm riscv s390 powerpc loongarch"
+
+# GNU make 4.0 or newer, which is what the kernel build system requires and what a mac does not
+# have: the make in /usr/bin there is GNU make 3.81, and Homebrew's is gmake.
+kernel_make() {
+	for candidate in "${MAKE:-make}" gmake; do
+		command -v "$candidate" >/dev/null 2>&1 || continue
+		case $("$candidate" --version 2>/dev/null | head -1) in
+		"GNU Make "[4-9]* | "GNU Make "[1-9][0-9]*) printf '%s\n' "$candidate"; return 0 ;;
+		esac
+	done
+	die "no GNU make 4.0 or newer on the path, and the kernel build system needs one"
+}
+
+# A case sensitive filesystem, which this tree cannot exist without. Eight pairs of the installed
+# headers differ only in case, all of them in netfilter, where the lowercase name is an iptables
+# match and the uppercase one is the target of the same name: xt_connmark.h and xt_CONNMARK.h, and
+# the same for xt_dscp.h, xt_mark.h, xt_rateest.h, xt_tcpmss.h, ipt_ecn.h, ipt_ttl.h and ip6t_hl.h.
+# On a default macOS filesystem one of each pair overwrites the other while the archive is unpacked,
+# with no error, so the tree that comes out is missing eight headers and has eight others holding
+# contents that are not theirs. Zig 0.16 ships a copy with all eight uppercase files missing, which
+# is what that looks like once it has gone out. Better to say so before downloading a hundred and
+# fifty megabytes than to produce it again.
+case_sensitive() {
+	probe=$1/.case-probe
+	rm -rf "$probe" "$1/.case-PROBE"
+	mkdir -p "$probe"
+	if [ -d "$1/.case-PROBE" ]; then
+		rmdir "$probe"
+		return 1
+	fi
+	rmdir "$probe"
+	return 0
+}
+
+# Fetch and unpack the pinned Linux source once, and print where it went. The same shape bin/sysroot
+# uses for musl, and the same rule: nothing is fetched without a hash and nothing is fetched from a
+# URL that is not on a line of sysroots/manifest.
+linux_source() {
+	line=$(awk -F'\t' '$1 == "linux" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no linux line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/linux-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+# Everything under a directory, hashed, as manifest lines, in the C locale. The same function
+# bin/sysroot has, for the same reason: the order a directory walk returns files in is a property of
+# the filesystem, and a record that carried that order would report a difference between two trees
+# that are identical.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_licence=$3
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			printf '%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_source" "$(sha256 "$walk_file")" "$walk_licence"
+		done
+	)
+}
+
+jobs_available() {
+	if command -v nproc >/dev/null 2>&1; then
+		nproc
+	elif command -v sysctl >/dev/null 2>&1; then
+		sysctl -n hw.ncpu
+	else
+		printf '2\n'
+	fi
+}
+
+produce() {
+	root=$cache/kernel-headers
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "the kernel headers are already produced in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	mkdir -p "$cache"
+	case_sensitive "$cache" ||
+		die "$cache is on a case insensitive filesystem, and eight of these headers differ from \
+eight others only in case, so run this on a Linux host or on a case sensitive volume"
+
+	make=$(kernel_make)
+	source=$(linux_source)
+	version=$(basename "$source" | sed 's/^linux-//')
+	licence=$(awk -F'\t' '$1 == "linux" { print $3; exit }' "$pins")
+
+	# One install per architecture into its own staging directory, out of tree, so the source stays
+	# the unpacked tarball and seven builds cannot see each other's generated files. headers_install
+	# needs a host compiler for scripts/unifdef and no cross compiler at all, which is why there is
+	# no zig in this script: the headers are the same text whatever compiles the program that reads
+	# them, and the target is ARCH= rather than a toolchain.
+	work=$cache/kernel-headers.part
+	rm -rf "$work"
+	mkdir -p "$work"
+	for arch in $all; do
+		say "installing the $arch headers of linux $version"
+		"$make" -s -j"$(jobs_available)" -C "$source" O="$work/build-$arch" ARCH="$arch" \
+			INSTALL_HDR_PATH="$work/install-$arch" headers_install >"$work/$arch.log" 2>&1 ||
+			{ tail -20 "$work/$arch.log" >&2; die "the $arch headers did not install, and the log is in $work"; }
+		[ -d "$work/install-$arch/include/asm" ] ||
+			die "the $arch install has no asm directory, so ARCH=$arch is not what the kernel calls it"
+	done
+
+	# One rule for the whole tree: a header every architecture installs with identical contents goes
+	# in the shared directory, and every other header goes in the directory of each architecture that
+	# has it, which the compiler searches first. Not a rule about asm/, even though asm/ is where
+	# almost all of the difference is, because three headers outside it are installed for some
+	# architectures and not for others and a rule with an exception in it is a rule somebody has to
+	# maintain. The same rule covers both kinds of difference, contents and presence, and it makes the
+	# shared directory exactly the set of files that every Linux target would otherwise carry its own
+	# copy of.
+	first=$(printf '%s\n' "$all" | cut -d' ' -f1)
+	for arch in $all; do
+		(cd "$work/install-$arch/include" && find . -type f | sed 's|^\./||')
+	done | LC_ALL=C sort -u >"$work/paths"
+
+	mkdir -p "$work/tree/generic"
+	shared=0
+	private=0
+	: >"$work/outside-asm"
+	while read -r file; do
+		same=yes
+		for arch in $all; do
+			if ! cmp -s "$work/install-$first/include/$file" "$work/install-$arch/include/$file" 2>/dev/null; then
+				same=no
+				break
+			fi
+		done
+		if [ "$same" = yes ]; then
+			mkdir -p "$(dirname "$work/tree/generic/$file")"
+			cp "$work/install-$first/include/$file" "$work/tree/generic/$file"
+			shared=$((shared + 1))
+			continue
+		fi
+		for arch in $all; do
+			[ -f "$work/install-$arch/include/$file" ] || continue
+			mkdir -p "$(dirname "$work/tree/$arch/$file")"
+			cp "$work/install-$arch/include/$file" "$work/tree/$arch/$file"
+			private=$((private + 1))
+			case $file in
+			asm/*) ;;
+			*) printf '%s\t%s\n' "$arch" "$file" >>"$work/outside-asm" ;;
+			esac
+		done
+	done <"$work/paths"
+
+	# The three headers outside asm/ that are not the same everywhere, named here so that a fourth
+	# one is a failure somebody reads rather than a tree nobody looked at. linux/a.out.h is installed
+	# for x86 alone, because a.out is a format no other port ever supported; linux/kvm.h is installed
+	# everywhere except arm, which lost its KVM port; and linux/kvm_para.h is installed everywhere
+	# except riscv, which has no paravirtualisation interface. Each of those is a fact about the
+	# kernel rather than about this script, and the day a release changes one is the day somebody
+	# should look at the list rather than at a diff of five thousand manifest lines.
+	expected="linux/a.out.h linux/kvm.h linux/kvm_para.h"
+	cut -f2 "$work/outside-asm" | LC_ALL=C sort -u >"$work/outside-asm.names"
+	while read -r file; do
+		case " $expected " in
+		*" $file "*) ;;
+		*) die "$file is not the same for every architecture and bin/kernel-headers did not expect that" ;;
+		esac
+	done <"$work/outside-asm.names"
+
+	# Its own record rather than a sysroot manifest, because a sysroot manifest names the target it
+	# was produced for and this tree has no target: it is one tree for every Linux row. The columns
+	# are the same four, so the same eyes read a diff of either one, and the header says which kernel
+	# release the whole of it came from, which is the question a difference between two of these
+	# starts with.
+	{
+		printf 'rucc kernel headers manifest 1\nlinux\t%s\n' "$version"
+		manifest_lines "$work/tree" "linux-$version" "$licence"
+	} >"$work/tree/manifest"
+
+	rm -rf "$root"
+	mv "$work/tree" "$root"
+	rm -rf "$work"
+	say "linux $version is in $root, $shared headers shared and $private per architecture"
+	say "$(grep -c '' "$root/manifest") manifest lines, $(du -sk "$root" | cut -f1)K, \
+$(du -sk "$root/generic" | cut -f1)K of it shared"
+	printf '%s\n' "$root/manifest"
+}
+
+# Compare two manifests and say what differs, which is the reproducibility check. Two hosts, one
+# pinned source, one argument list, and the two records have to be the same file.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+case ${1:-} in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/kernel-headers --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	produce
+	;;
+"") produce ;;
+*) die "unknown argument $1" ;;
+esac

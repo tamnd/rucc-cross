@@ -22,9 +22,19 @@
 # covers. M9.5 builds a glibc sysroot from this same row, which is why a libc source belongs here
 # rather than in a table of its own.
 #
+# linux 6.19 is there for its uapi headers, which are the system call interface every Linux target
+# compiles against and which no libc provides: `bin/kernel-headers` runs `make headers_install` out
+# of this tarball and lays the result out as the two directories the compiler searches after the
+# libc's two. The release is the one Zig 0.16 carries, which is not a guess either, because its
+# bundled linux/version.h says LINUX_VERSION_CODE 398080 and that is 6.19.0. Pinning the same one is
+# what makes a diff between our tree and zig's any-linux-any a difference in how it was produced.
+# The licence is the kernel's GPL-2.0 with the syscall note, and the note is the whole reason a
+# program that is not GPL may use these headers to make a system call.
+#
 # Nothing here is fetched without a hash and nothing is fetched from a URL that is not on one of
 # these lines. `toolchains/record-hash musl 1.2.5 - <url>` downloads once and prints a line whose
 # fourth column is the hash, which is the column that belongs here, so nobody types one from memory.
 
 musl	1.2.5	mit	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	https://musl.libc.org/releases/musl-1.2.5.tar.gz
 glibc	2.44	lgpl	37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667	https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz
+linux	6.19	gpl-2.0-with-linux-syscall-note	303079a8250b8f381f82b03f90463d12ac98d4f6b149b761ea75af1323521357	https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.19.tar.xz

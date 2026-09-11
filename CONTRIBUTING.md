@@ -18,7 +18,7 @@ To run the corpus with the compiler instead of the reference, build rucc and poi
 RUCC=../rucc/target/release/rucc bin/run-corpus --cc rucc x86_64-linux-musl
 ```
 
-That needs `bin/sysroot x86_64-linux-musl` to have been run first, and it needs a linker the compiler can find, which on a machine with no lld is a shim on the path that runs the pinned zig's. It is not in the gate, because CI here has no compiler checked out and a job that silently skips every row is a job that says nothing.
+That needs `bin/sysroot x86_64-linux-musl` to have been run first, and `bin/kernel-headers` as well if anything in the corpus reaches a header that includes one of the kernel's, and it needs a linker the compiler can find, which on a machine with no lld is a shim on the path that runs the pinned zig's. It is not in the gate, because CI here has no compiler checked out and a job that silently skips every row is a job that says nothing.
 
 If `bin/facts --check` fails, read the diff before you run `bin/facts --record`. A facts file changing means either the reference compiler moved or a target's definition did, and both are worth a sentence in the commit message. Recording a diff you did not read turns a finding into a fact.
 
