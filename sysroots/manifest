@@ -13,12 +13,21 @@
 # what makes the comparison between the two mean anything: a difference between our sysroot and
 # zig's is then a difference in how it was built rather than in what was built.
 #
-# There are two glibc rows, and the order matters: the first one is the pin, and every later one is a
-# release fetched by version for a comparison. `bin/glibc-headers` and `bin/abilist` take the first
-# glibc row and nothing else, because the tree we ship and the symbol list we generate stubs from are
-# one release. `bin/glibc-distribution` asks for a version by name instead, which is the version the
-# machine it runs on ships, because a comparison between two different releases of glibc says nothing
-# and Ubuntu 24.04 is glibc 2.39.
+# There are several glibc rows, and the order matters: the first one is the pin, and every later one
+# is a release fetched by version for a comparison. `bin/glibc-headers` and `bin/abilist` take the
+# first glibc row and nothing else, because the tree we ship and the symbol list we generate stubs
+# from are one release. `bin/glibc-distribution` asks for a version by name instead, which is the
+# version the machine it runs on ships, because a comparison between two different releases of glibc
+# says nothing and Ubuntu 24.04 is glibc 2.39. `bin/glibc-versions` takes all of them, because the
+# thing it measures is what the releases differ by.
+#
+# Which releases, and why these. Each one is the glibc of a distribution somebody targets: 2.28 is
+# RHEL 8 and Debian 10, 2.31 is Ubuntu 20.04, 2.34 is RHEL 9 and the release that merged libpthread
+# into libc, 2.35 is Ubuntu 22.04, 2.36 is Debian 12, 2.39 is Ubuntu 24.04, 2.41 is Ubuntu 25.04 and
+# 2.44 is current. 2.28 is the oldest one here for a reason that is not a choice: glibc 2.17, which is
+# the floor the stub document names, reads the version of gcc and make with a pattern that does not
+# understand a two digit major, so its configure stops on a current machine saying both are missing or
+# too old.
 #
 # glibc 2.44 is here for its abilist files, which are glibc's own record of which symbol it exports
 # at which version node and are what the compiler writes its glibc stubs from. `bin/abilist` takes
@@ -44,5 +53,11 @@
 
 musl	1.2.5	mit	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	https://musl.libc.org/releases/musl-1.2.5.tar.gz
 glibc	2.44	lgpl	37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667	https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz
+glibc	2.41	lgpl	a5a26b22f545d6b7d7b3dd828e11e428f24f4fac43c934fb071b6a7d0828e901	https://ftp.gnu.org/gnu/glibc/glibc-2.41.tar.xz
 glibc	2.39	lgpl	f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926	https://ftp.gnu.org/gnu/glibc/glibc-2.39.tar.xz
+glibc	2.36	lgpl	1c959fea240906226062cb4b1e7ebce71a9f0e3c0836c09e7e3423d434fcfe75	https://ftp.gnu.org/gnu/glibc/glibc-2.36.tar.xz
+glibc	2.35	lgpl	5123732f6b67ccd319305efd399971d58592122bcc2a6518a1bd2510dd0cf52e	https://ftp.gnu.org/gnu/glibc/glibc-2.35.tar.xz
+glibc	2.34	lgpl	44d26a1fe20b8853a48f470ead01e4279e869ac149b195dda4e44a195d981ab2	https://ftp.gnu.org/gnu/glibc/glibc-2.34.tar.xz
+glibc	2.31	lgpl	9246fe44f68feeec8c666bb87973d590ce0137cca145df014c72ec95be9ffd17	https://ftp.gnu.org/gnu/glibc/glibc-2.31.tar.xz
+glibc	2.28	lgpl	b1900051afad76f7a4f73e71413df4826dce085ef8ddb785a945b66d7d513082	https://ftp.gnu.org/gnu/glibc/glibc-2.28.tar.xz
 linux	6.19	gpl-2.0-with-linux-syscall-note	303079a8250b8f381f82b03f90463d12ac98d4f6b149b761ea75af1323521357	https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.19.tar.xz

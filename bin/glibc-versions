@@ -1,0 +1,477 @@
+#!/bin/sh
+# Record what glibc's installed headers actually differ by between the releases in the support table.
+#
+# usage: bin/glibc-versions
+#        bin/glibc-versions --write
+#        bin/glibc-versions --force
+#
+# Section 8.3 of the compiler's sysroot specification says one header tree per libc, with the per
+# version differences written as `#if __GLIBC_MINOR__ >= n` inside a single file rather than as a
+# tree per version. We ship one release's headers today, so a target asking for an older glibc is
+# handed a newer one's text. The first thing that work needs is not a merge, it is a measurement: a
+# merge nobody has measured is a merge nobody can review, and the question to answer first is which
+# files a conditional would have to be written into at all.
+#
+# So this installs glibc's headers once per release in sysroots/manifest, for one ABI, and writes
+# down for every file which releases have it and which releases changed it. The record is
+# sysroots/glibc-version-changes. With no argument the record is produced and held against the
+# committed one, which is what the nightly run does; --write replaces it, which is what somebody does
+# when a release is added to the manifest.
+#
+# What counts as a change, and why it is not the bytes. A byte comparison is the right tool for
+# holding one install against another install of the same release, which is what bin/glibc-distribution
+# does, and it is the wrong tool here: glibc bumps the copyright year in every file every January and
+# changed the licence URL from http to https in 2019, so 420 of the 498 files differ somewhere between
+# 2.28 and 2.44 and almost all of that is text a merge would simply take from the newest release. What
+# a merge has to conditionalize is the code, so a file is compared with its comments removed, its
+# blank lines dropped and its runs of spaces and tabs collapsed. That takes the 420 down to 210, which
+# is the number the box is about.
+#
+# One ABI, and it is x86_64. The question is which of glibc's own files change between releases, and
+# that is a fact about glibc's source rather than about a machine: the part that differs between ABIs
+# is what bin/glibc-headers already measured and split into seven family trees. Nine releases times
+# nine ABIs is eighty one installs for an answer the ninth would not change.
+#
+# The compiler is the distribution's own gcc, with the pinned zig as a fallback, the same order and
+# for the same reason as bin/glibc-distribution: a glibc older than about 2.41 will not configure with
+# clang at all. Older still and gcc is not enough either. glibc 2.17, which document 09.5 calls the
+# practical floor, reads the version of gcc and make with a pattern that does not understand a two
+# digit major, so on a machine with gcc 13 and make 4.3 its configure stops saying both are missing or
+# too old. 2.28 is the oldest release that configures on a current machine without being patched
+# first, which is the release that document calls the comfortable floor, so that is where the survey
+# starts and the floor below it is a separate piece of work.
+#
+# The kernel headers have to exist first, the same as for bin/glibc-headers, so run that first.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+record=$here/sysroots/glibc-version-changes
+write=
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-versions: $*"; exit 1; }
+
+# The one row this runs for, as the tuple, the name for a directory and the kernel architecture glibc
+# is configured against, in the three spellings the other commands use.
+tuple=x86_64-linux-gnu
+karch=x86
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The same hash, over many files at once, because this hashes about four and a half thousand of them
+# and a process per file is most of the runtime. Reads a null separated list of paths, the way the one
+# caller produces it, and both programs print the hash and then the path with two spaces between.
+sha256_many() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		xargs -0 sha256sum
+	else
+		xargs -0 shasum -a 256
+	fi
+}
+
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+target_column() {
+	spelling=$(awk -F'\t' -v t="$1" -v c="$2" '$1 == t { print $c; exit }' "$here/targets")
+	if [ -z "$spelling" ] || [ "$spelling" = "-" ]; then
+		die "$1 has no column $2 in the targets table"
+	fi
+	printf '%s\n' "$spelling"
+}
+
+# Every glibc release in sysroots/manifest, oldest first. The manifest is the list on purpose: adding
+# a release there adds it to the survey and to the comparison bin/glibc-distribution can make, and a
+# second list of releases somewhere else would be a second thing to forget. The sort is on the minor
+# number rather than with sort -V, which is a GNU extension, and it is enough while every glibc
+# release is 2 point something.
+versions() {
+	awk -F'\t' '$1 == "glibc" { print $2 }' "$pins" | sort -t. -k2,2n
+}
+
+# The source for one release, fetched and verified against its manifest row. The same function
+# bin/glibc-distribution has, which takes a version rather than the pin for the same reason.
+glibc_source() {
+	line=$(awk -F'\t' -v v="$1" '$1 == "glibc" && $2 == v { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no glibc $1 row"
+
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/glibc-$1
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+glibc_make() {
+	for candidate in "${MAKE:-make}" gmake; do
+		command -v "$candidate" >/dev/null 2>&1 || continue
+		case $("$candidate" --version 2>/dev/null | head -1) in
+		"GNU Make "[4-9]* | "GNU Make "[1-9][0-9]*) printf '%s\n' "$candidate"; return 0 ;;
+		esac
+	done
+	die "no GNU make 4.0 or newer on the path, and glibc's build system needs one"
+}
+
+host_tools() {
+	for tool in gawk bison sed python3; do
+		command -v "$tool" >/dev/null 2>&1 ||
+			die "$tool is not on the path, and glibc's configure calls it critical"
+	done
+}
+
+# The kernel tree this row is configured against, assembled out of the split bin/kernel-headers
+# produced, and assembled before anything forks so that nine jobs do not write one directory.
+kernel_tree() {
+	[ -d "$cache/kernel-headers/$karch" ] ||
+		die "$cache/kernel-headers has no $karch, so run bin/kernel-headers first"
+	mkdir -p "$1/kernel-$karch"
+	cp -R "$cache/kernel-headers/generic/." "$1/kernel-$karch/"
+	cp -R "$cache/kernel-headers/$karch/." "$1/kernel-$karch/"
+}
+
+cc_multiarch() {
+	if command -v "$1-gcc" >/dev/null 2>&1; then
+		"$1-gcc" -print-multiarch 2>/dev/null
+	elif command -v gcc >/dev/null 2>&1; then
+		gcc -print-multiarch 2>/dev/null
+	fi
+}
+
+# One release: install its headers with the distribution's gcc where that works and the pinned zig
+# where it does not. Runs three at a time, so every step says || exit 1 rather than trusting set -e,
+# which does not apply inside a subshell on the left of an &&, and the answer arrives in a file
+# because a background job can tell the shell that started it nothing else.
+install_one() {
+	one_version=$1
+	one_work=$2
+	one_source=$3
+	one_make=$4
+	one_host=$(target_column "$tuple" 3)
+
+	# An install that is already there is left alone, because the source is pinned and the work
+	# directory is a cache rather than a scratch space. Its status file is left alone too, so that a
+	# rerun still says which compiler produced it, and is written only if something else populated the
+	# cache.
+	if [ -f "$one_work/install-$one_version/usr/include/features.h" ]; then
+		[ -f "$one_work/$one_version.status" ] ||
+			printf 'ok\tan earlier run\n' >"$one_work/$one_version.status"
+		return 0
+	fi
+
+	rm -rf "$one_work/build-$one_version" "$one_work/install-$one_version"
+	mkdir -p "$one_work/build-$one_version"
+	if command -v "$one_host-gcc" >/dev/null 2>&1; then
+		one_cc=$one_host-gcc
+	elif [ "$one_host" = "$(cc_multiarch "$one_host")" ] && command -v gcc >/dev/null 2>&1; then
+		one_cc=gcc
+	else
+		one_cc=
+	fi
+
+	if [ -n "$one_cc" ] &&
+		install_with "$one_version" "$one_work" "$one_source" "$one_make" "$one_cc" gcc; then
+		printf 'ok\t%s\n' "$one_cc" >"$one_work/$one_version.status"
+		return 0
+	fi
+
+	# The zig wrapper, with the cache variables that get past the probes clang cannot answer. They are
+	# written out in bin/glibc-headers and bin/glibc-distribution, and none of them can reach the text
+	# that is installed, because install-headers compiles nothing.
+	rm -rf "$one_work/build-$one_version"
+	mkdir -p "$one_work/build-$one_version"
+	one_zig=$(zig)
+	one_zig_target=$(target_column "$tuple" 2)
+	printf '#!/bin/sh\nexec %s cc -target %s -Wno-unused-command-line-argument "$@"\n' \
+		"$one_zig" "$one_zig_target" >"$one_work/cc-$one_version"
+	chmod +x "$one_work/cc-$one_version"
+	if install_with "$one_version" "$one_work" "$one_source" "$one_make" \
+		"$one_work/cc-$one_version" zig; then
+		printf 'ok\tzig\n' >"$one_work/$one_version.status"
+		return 0
+	fi
+	printf 'failed\t-\n' >"$one_work/$one_version.status"
+}
+
+install_with() {
+	with_version=$1
+	with_work=$2
+	with_source=$3
+	with_make=$4
+	with_cc=$5
+	with_which=$6
+	with_host=$(target_column "$tuple" 3)
+	with_extra=
+	[ "$with_which" = gcc ] ||
+		with_extra="libc_cv_compiler_ok=yes libc_cv_gcc_builtin_redirection=yes libc_cv_cc_no_direct_extern_access=no libc_cv_mlong_double_128=yes libc_cv_no_gnu_attr_ok=yes"
+
+	(
+		cd "$with_work/build-$with_version" || exit 1
+		# shellcheck disable=SC2086
+		# The cache variables are a list of assignments and have to arrive as separate arguments, which
+		# is what leaving this one unquoted is for. Every value in it is written above, in this file.
+		"$with_source/configure" --prefix=/usr --host="$with_host" \
+			--with-headers="$with_work/kernel-$karch" --disable-werror \
+			CC="$with_cc" CXX= $with_extra \
+			>"$with_work/$with_version.$with_which.configure.log" 2>&1 || exit 1
+		"$with_make" install-headers install_root="$with_work/install-$with_version" \
+			install-bootstrap-headers=yes >"$with_work/$with_version.$with_which.make.log" 2>&1 || exit 1
+	)
+}
+
+# Every installed header of one release with its comments taken out, written into a tree of its own so
+# that two releases can be compared by the code in them. One awk process for the whole release rather
+# than one per file, which is why the output path is computed inside awk and why the directories are
+# made first.
+#
+# The stripper is a state machine over a line at a time, and it knows about a block comment that spans
+# lines, a line comment, and a string or character literal with backslash escapes in it, because
+# `"/*"` inside a literal is not a comment. What it does not know about is a line comment continued
+# with a backslash, which glibc's headers do not have: they are C89 sources and `//` appears in them
+# only inside a URL inside a block comment.
+normalize() {
+	norm_from=$1
+	norm_into=$2
+	rm -rf "$norm_into"
+	mkdir -p "$norm_into"
+	for dir in $(cd "$norm_from" && find . -type d); do
+		mkdir -p "$norm_into/$dir"
+	done
+	(
+		cd "$norm_from" || exit 1
+		# shellcheck disable=SC2016
+		find . -type f -print0 | xargs -0 awk -v out="$norm_into" '
+			FILENAME != seen {
+				if (seen != "") close(out "/" seen)
+				seen = FILENAME
+				inblock = 0
+				instr = 0
+				# Opened and truncated here rather than on the first line that survives the stripper,
+				# because bits/initspin.h is one comment and nothing else, and a file that was never
+				# created is a file the record would not have a row for.
+				printf "" > (out "/" FILENAME)
+			}
+			{
+				line = $0
+				kept = ""
+				i = 1
+				n = length(line)
+				while (i <= n) {
+					c = substr(line, i, 1)
+					d = substr(line, i, 2)
+					if (inblock) {
+						if (d == "*/") { inblock = 0; i += 2 } else { i += 1 }
+						continue
+					}
+					if (instr) {
+						kept = kept c
+						if (c == "\\") { kept = kept substr(line, i + 1, 1); i += 2; continue }
+						if (c == quote) { instr = 0 }
+						i += 1
+						continue
+					}
+					if (d == "/*") { inblock = 1; kept = kept " "; i += 2; continue }
+					if (d == "//") { break }
+					if (c == "\"" || c == "'"'"'") { instr = 1; quote = c; kept = kept c; i += 1; continue }
+					kept = kept c
+					i += 1
+				}
+				gsub(/[ \t]+/, " ", kept)
+				gsub(/^ | $/, "", kept)
+				if (kept != "") { print kept > (out "/" FILENAME) }
+			}
+		' || exit 1
+	)
+}
+
+# One release as a list of `version  file  hash` records over the stripped tree. The paths have no
+# spaces in them, which is true of every header glibc installs and is what lets the hash and the path
+# be read as two fields.
+code_manifest() {
+	(
+		cd "$1" || exit 1
+		find . -type f -print0 | sha256_many |
+			awk -v v="$2" '{ sub(/^\.\//, "", $2); print v "\t" $2 "\t" $1 }'
+	)
+}
+
+# The record: one row per file, as the release that first has it, the last release that has it, and
+# the releases where its code is not what the release before had, or a dash for a file that has never
+# changed. The input is every release's manifest, sorted by file and then by the release's position in
+# the list, so one pass sees each file's whole history in order.
+#
+# A file that disappears and comes back would be a history this format cannot express, so it is a
+# failure with the file named rather than a row that reads as if nothing happened. None of the nine
+# releases has one.
+build_record() {
+	build_work=$1
+	shift
+	: >"$build_work/all"
+	index=0
+	for version in "$@"; do
+		index=$((index + 1))
+		code_manifest "$build_work/code-$version" "$version" |
+			awk -F'\t' -v i="$index" '{ print $2 "\t" i "\t" $1 "\t" $3 }' >>"$build_work/all"
+	done
+
+	LC_ALL=C sort -t'	' -k1,1 -k2,2n "$build_work/all" |
+		awk -F'\t' '
+			$1 != file {
+				if (file != "") { emit() }
+				file = $1
+				first = $3
+				last = $3
+				at = ""
+				previous_hash = $4
+				previous_index = $2
+				next
+			}
+			{
+				if ($2 != previous_index + 1) {
+					printf "%s is in %s and not in the release before it\n", file, $3 > "/dev/stderr"
+					gap = 1
+				}
+				if ($4 != previous_hash) { at = at (at == "" ? "" : ",") $3 }
+				last = $3
+				previous_hash = $4
+				previous_index = $2
+			}
+			END { if (file != "") { emit() }; exit gap ? 1 : 0 }
+			function emit() {
+				printf "%s\t%s\t%s\t%s\n", file, first, last, (at == "" ? "-" : at)
+			}
+		'
+}
+
+survey() {
+	make=$(glibc_make)
+	host_tools
+	list=$(versions)
+	[ -n "$list" ] || die "sysroots/manifest has no glibc rows"
+
+	work=$cache/glibc-versions
+	[ -z "$force" ] || rm -rf "$work"
+	mkdir -p "$work"
+	kernel_tree "$work"
+
+	running=0
+	for version in $list; do
+		source=$(glibc_source "$version")
+		say "installing the $(target_column "$tuple" 3) headers of glibc $version"
+		install_one "$version" "$work" "$source" "$make" &
+		running=$((running + 1))
+		if [ "$running" -ge 3 ]; then
+			wait
+			running=0
+		fi
+	done
+	wait
+
+	for version in $list; do
+		status=$(cut -f1 "$work/$version.status" 2>/dev/null || true)
+		[ "$status" = ok ] || {
+			tail -20 "$work/$version".*.configure.log 2>/dev/null >&2 || true
+			die "glibc $version did not install with either compiler, and the logs are in $work"
+		}
+		say "glibc $version: $(find "$work/install-$version/usr/include" -type f | wc -l | tr -d ' ') headers, installed with $(cut -f2 "$work/$version.status")"
+	done
+
+	for version in $list; do
+		normalize "$work/install-$version/usr/include" "$work/code-$version"
+	done
+
+	# shellcheck disable=SC2086
+	# The releases are a list and have to arrive as separate arguments.
+	build_record "$work" $list >"$work/record" ||
+		die "a file is missing from a release in the middle of the range, which the record cannot say"
+
+	files=$(wc -l <"$work/record" | tr -d ' ')
+	changed=$(awk -F'\t' '$4 != "-"' "$work/record" | wc -l | tr -d ' ')
+	say "$files files over $(printf '%s\n' "$list" | wc -l | tr -d ' ') releases, $changed of them with a change in the code"
+
+	if [ -n "$write" ]; then
+		{
+			record_header "$list" "$files" "$changed"
+			cat "$work/record"
+		} >"$record.part"
+		mv "$record.part" "$record"
+		say "wrote $record"
+		return 0
+	fi
+
+	[ -f "$record" ] || die "$record is not there, so run bin/glibc-versions --write first"
+	awk '!/^#/ && NF > 0' "$record" >"$work/committed"
+	if diff -u "$work/committed" "$work/record" >"$work/diff"; then
+		say "the record is what this machine produces"
+		return 0
+	fi
+	head -40 "$work/diff" >&2
+	die "the record and what this machine produces are not the same, and the diff is in $work/diff"
+}
+
+# The comment at the top of the record, written here rather than kept in the file, because every
+# number in it is a count of the rows under it and a stale count is worse than no count.
+record_header() {
+	cat <<RECORD
+# What glibc's installed headers differ by between releases, measured rather than assumed.
+#
+# One record per line, tab separated, in this order:
+#
+#   file  first  last  changed at
+#
+# The file is a path under the installed include directory. First and last are the oldest and the
+# newest release in the survey that install it. Changed at is every release whose copy of the file is
+# not the code the release before it had, or a dash for a file that has never changed.
+#
+# Produced by bin/glibc-versions, which is where the method is written down: one install per release
+# for the x86_64 ABI, and a comparison of the code in each file rather than of its bytes, because
+# glibc bumps a copyright year in every file every January and that is not something a merged tree
+# would have to write a conditional for.
+#
+# The releases, oldest first: $(printf '%s' "$1" | tr '\n' ' ' | sed 's/  *$//')
+#
+# $2 files, $3 of them with a change in the code somewhere in that range.
+RECORD
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--write) write=yes ;;
+	--force) force=yes ;;
+	*) die "usage: bin/glibc-versions [--write] [--force]" ;;
+	esac
+	shift
+done
+
+survey

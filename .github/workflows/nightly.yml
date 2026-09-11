@@ -246,6 +246,28 @@ jobs:
           ./bin/kernel-headers
           ./bin/glibc-distribution
 
+  # What the releases in the support table differ by, held against the committed record. This is the
+  # measurement the multi-version tree is waiting on, so the thing that can go wrong with it is that
+  # somebody changes how a release is installed or adds a release to sysroots/manifest and the record
+  # stops describing what comes out. Either is a real answer and neither is noise, which is why this
+  # fails the run like the others.
+  #
+  # One architecture, unlike the job above, because the survey installs one ABI and it would be the
+  # same record from either runner. The eight installs are about two minutes between them.
+  glibc-versions:
+    name: what the glibc releases differ by
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install the cross compilers
+        run: ./toolchains/install gcc-cross
+      - name: install zig
+        run: ./toolchains/install zig
+      - name: hold the record against what this machine produces
+        run: |
+          ./bin/kernel-headers
+          ./bin/glibc-versions
+
   # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
   # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
   # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
@@ -304,6 +326,7 @@ jobs:
       - glibc-headers
       - glibc-headers-reproducible
       - glibc-distribution
+      - glibc-versions
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
@@ -313,7 +336,9 @@ jobs:
       # a header tree that came out different on two hosts is a bug in how it is produced. Either one
       # is somebody here fixing something, and the two header trees count the same way. So does the
       # comparison against the distribution: a header that is not the distribution's text is either a
-      # patch nobody has written down yet or a recipe that stopped producing what it claims to.
+      # patch nobody has written down yet or a recipe that stopped producing what it claims to. The
+      # survey of what the releases differ by counts the same way, because a record that has stopped
+      # describing what comes out is a record nobody should be reading.
       - name: fail if one of ours failed
         if: >-
           needs.execute.result != 'success' || needs.real-libc.result != 'success'
@@ -322,6 +347,7 @@ jobs:
           || needs.glibc-headers.result != 'success'
           || needs.glibc-headers-reproducible.result != 'success'
           || needs.glibc-distribution.result != 'success'
+          || needs.glibc-versions.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"
