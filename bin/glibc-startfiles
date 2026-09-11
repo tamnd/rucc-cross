@@ -201,8 +201,12 @@ kernel_trees() {
 # Makerules that generates a header of assembly constants stops on a missing file. A line that asks
 # for both is therefore run twice, once as it came for the dependency file and once without those
 # four for the assembly. That needs the translation unit to be readable twice, and the script that
-# asks passes it on standard input so that no temporary name reaches the dependency file, so standard
-# input is written to a file and the `-` replaced by it.
+# asks passes it on standard input, so standard input is written to a file and the `-` replaced by it,
+# and then that name is taken back out of the dependency file. It has to come out: make restarts when
+# a dependency file it included has changed, and on the second pass a prerequisite named after a
+# temporary directory that no longer exists is a stop rather than a warning. Taking it out is also
+# what gcc does, which answers the question of what the file should say instead. Given the same
+# program on standard input it writes the headers it read and nothing for the source.
 #
 # An argument naming an existing file whose name ends in .os is copied to one ending in .o, because
 # zig cc decides what an input is from its suffix and answers "unrecognized file extension" for
@@ -224,13 +228,17 @@ write_cc() {
 deps=
 asm=
 rewrite=
+depfile=
+previous=
 for argument in "$@"; do
+	[ "$previous" = -MF ] && depfile=$argument
 	case $argument in
 	-S) asm=yes ;;
 	-MD | -MP | -MF | -MT) deps=yes ;;
 	-mlong-double-128 | -mno-gnu-attribute) rewrite=yes ;;
 	*.os) [ -f "$argument" ] && rewrite=yes ;;
 	esac
+	previous=$argument
 done
 
 if [ -z "$rewrite" ] && { [ -z "$deps" ] || [ -z "$asm" ]; }; then
@@ -274,6 +282,10 @@ done
 
 if [ -n "$deps" ] && [ -n "$asm" ]; then
 	"$zig" cc -target "$target" -Wno-unused-command-line-argument "$@" -g0 || exit $?
+	if [ -f "$tmp/stdin.c" ] && [ -n "$depfile" ] && [ -f "$depfile" ]; then
+		sed -e "s| $tmp/stdin.c||g" -e "\\|^$tmp/stdin.c:\$|d" "$depfile" >"$tmp/deps" &&
+			cat "$tmp/deps" >"$depfile"
+	fi
 	count=$#
 	index=0
 	while [ "$index" -lt "$count" ]; do
