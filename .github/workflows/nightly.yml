@@ -201,6 +201,65 @@ jobs:
       - name: they have to be the same file
         run: ./bin/glibc-headers --check records/glibc-headers-X64/manifest records/glibc-headers-ARM64/manifest
 
+  # glibc's start files for all nine glibc ABIs, produced on both host architectures, and the two
+  # records held against each other. The third reproducibility job, and the first one whose output is
+  # compiled code rather than text: these are the objects every Linux link line begins with, so a
+  # difference between two hosts here is a difference in the program somebody gets.
+  #
+  # It also links and runs. Each ABI's files are linked three ways by the distribution's cross gcc and
+  # the result is executed, on hardware for the host's own row and under qemu for the others, so the
+  # job proves the objects work and not only that they hash the same. The cross compilers are therefore
+  # not optional here the way they are in the gate, and the x86 pair is x86-64 only because Ubuntu
+  # packages those two for an amd64 host. x32 is compiled and linked and never run, and the header of
+  # the targets table says why.
+  #
+  # Nine configures and nine builds of glibc's csu directory are about a minute and a half, on top of
+  # the kernel headers this needs first, which is the same reason the two jobs above are nightly.
+  glibc-startfiles:
+    name: glibc's start files on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: install zig, the cross compilers and qemu
+        run: |
+          ./toolchains/install zig
+          ./toolchains/install gcc-cross
+          ./toolchains/install qemu
+      - name: install the other two x86 trees
+        if: runner.arch == 'X64'
+        run: ./toolchains/install gcc-cross-x86
+      - name: produce the start files
+        run: |
+          ./bin/kernel-headers
+          ./bin/glibc-startfiles
+          cp "$HOME/.cache/rucc-cross/glibc-startfiles/manifest" manifest
+      - name: upload the record
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: glibc-startfiles-${{ runner.arch }}
+          path: manifest
+
+  glibc-startfiles-reproducible:
+    name: the same glibc start files on two hosts
+    needs: glibc-startfiles
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: download both records
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: records
+      - name: they have to be the same file
+        run: ./bin/glibc-startfiles --check records/glibc-startfiles-X64/manifest records/glibc-startfiles-ARM64/manifest
+
   # Upstream glibc's headers against the distribution's own, at the version the runner ships. The two
   # jobs above ask whether our tree is reproducible and whether it reassembles, which are both
   # questions about our own output. This one is the only job that asks whether the text is right, by
@@ -325,6 +384,8 @@ jobs:
       - kernel-headers-reproducible
       - glibc-headers
       - glibc-headers-reproducible
+      - glibc-startfiles
+      - glibc-startfiles-reproducible
       - glibc-distribution
       - glibc-versions
     runs-on: ubuntu-24.04
@@ -334,7 +395,9 @@ jobs:
       # a red mark every morning for either is a red mark people stop reading. The other three are
       # ours: a symbol we promise that glibc does not have is a bug in the compiler or in the pin, and
       # a header tree that came out different on two hosts is a bug in how it is produced. Either one
-      # is somebody here fixing something, and the two header trees count the same way. So does the
+      # is somebody here fixing something, and the two header trees count the same way. So do the
+      # start files, twice over: an object that came out different on two hosts is the same bug as a
+      # header that did, and one that does not link or does not run is a worse one. So does the
       # comparison against the distribution: a header that is not the distribution's text is either a
       # patch nobody has written down yet or a recipe that stopped producing what it claims to. The
       # survey of what the releases differ by counts the same way, because a record that has stopped
@@ -346,6 +409,8 @@ jobs:
           || needs.kernel-headers-reproducible.result != 'success'
           || needs.glibc-headers.result != 'success'
           || needs.glibc-headers-reproducible.result != 'success'
+          || needs.glibc-startfiles.result != 'success'
+          || needs.glibc-startfiles-reproducible.result != 'success'
           || needs.glibc-distribution.result != 'success'
           || needs.glibc-versions.result != 'success'
         run: exit 1
