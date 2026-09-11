@@ -1,0 +1,141 @@
+#!/bin/sh
+# Extract glibc's own abilist files from a pinned release, for the stub comparison in the compiler.
+#
+# usage: bin/abilist [arch]...
+#
+# An abilist is the file glibc keeps per architecture saying which symbol it exports at which
+# version node, and it is the description the compiler's glibc stubs are written from. `cargo xtask
+# real-libc` in tamnd/rucc holds a stub written from one of these against the real libc.so.6 on the
+# machine, which is the comparison spec/cross-compile/09-libc-stubs.md section 9.8 calls the single
+# highest value test in that document.
+#
+# The reason this lives here rather than in the compiler is the reason everything here lives here. A
+# comparison against a real libc needs a real libc's description, the description is in glibc's
+# source, and a compiler repository should not be downloading a libc to run its own tests. Fetching
+# against a pinned hash is this repository's job.
+#
+# With no argument it does every architecture in the table below. It writes $cache/abilists/<arch>/
+# libc.abilist, which is the layout the xtask side looks in, and prints the directory to hand it.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so the download survives a
+# branch switch. Doing this twice is a no-op, because a file that is already extracted is left alone.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "abilist: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# Where in glibc's source tree the abilist for an architecture is, keyed by the name the compiler
+# calls that architecture. The names on the left are the ones rustc and the target table use, because
+# the xtask side looks up the directory by the architecture it is running on and that is the spelling
+# it has. The paths on the right are glibc's own layout, which sorts by kernel first and then by
+# however the port wanted to arrange itself, so there is no rule to derive them from and they are
+# written out.
+#
+# Every row here is a row in the targets table too, under the name that table uses: i386 is
+# i686-linux-gnu, x86 is what the compiler calls that architecture, and arm and powerpc64 are the
+# little endian ports, because neither name says an endianness and the table has no big endian row.
+# The one row in the table with nothing here is x86_64-linux-gnux32, which shares an architecture name
+# with x86_64 and so cannot be told from it by the key this is keyed on. A host that runs x32 is the
+# day to give it a name of its own.
+abilist_path() {
+	case $1 in
+	x86_64) printf 'sysdeps/unix/sysv/linux/x86_64/64/libc.abilist\n' ;;
+	x86) printf 'sysdeps/unix/sysv/linux/i386/libc.abilist\n' ;;
+	aarch64) printf 'sysdeps/unix/sysv/linux/aarch64/libc.abilist\n' ;;
+	arm) printf 'sysdeps/unix/sysv/linux/arm/le/libc.abilist\n' ;;
+	riscv64) printf 'sysdeps/unix/sysv/linux/riscv/rv64/libc.abilist\n' ;;
+	powerpc64) printf 'sysdeps/unix/sysv/linux/powerpc/powerpc64/le/libc.abilist\n' ;;
+	# One file rather than the s390-32 and s390-64 pair an older glibc had, because the 31 bit port
+	# went and the directory with it.
+	s390x) printf 'sysdeps/unix/sysv/linux/s390/libc.abilist\n' ;;
+	loongarch64) printf 'sysdeps/unix/sysv/linux/loongarch/lp64/libc.abilist\n' ;;
+	*) die "$1 is not an architecture this knows the abilist path for" ;;
+	esac
+}
+
+all="x86_64 x86 aarch64 arm riscv64 powerpc64 s390x loongarch64"
+
+# The pinned glibc line from sysroots/manifest, which is where a libc source belongs whatever is
+# taken out of it. M9.5 builds a sysroot from this same row.
+line=$(awk -F'\t' '$1 == "glibc" { print; exit }' "$pins")
+[ -n "$line" ] || die "sysroots/manifest has no glibc line"
+version=$(printf '%s' "$line" | cut -f2)
+want=$(printf '%s' "$line" | cut -f4)
+url=$(printf '%s' "$line" | cut -f5)
+
+if [ $# -gt 0 ]; then
+	arches=$*
+else
+	arches=$all
+fi
+
+into=$cache/abilists
+missing=
+for arch in $arches; do
+	abilist_path "$arch" >/dev/null
+	[ -f "$into/$arch/libc.abilist" ] || missing="$missing $arch"
+done
+
+if [ -n "$missing" ]; then
+	mkdir -p "$cache"
+	archive=$cache/$(basename "$url")
+	if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+		say "fetching $url"
+		curl -fsSL --retry 3 -o "$archive.part" "$url"
+		mv "$archive.part" "$archive"
+	fi
+	got=$(sha256 "$archive")
+	[ "$got" = "$want" ] || {
+		rm -f "$archive"
+		die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+	}
+
+	# The members are named in full rather than matched with a pattern, because GNU tar needs
+	# --wildcards for a pattern and the tar on a mac does not have that flag. Naming them also means
+	# a path that moved in a new glibc fails here, with the path in the message, instead of quietly
+	# extracting nothing.
+	members=
+	for arch in $missing; do
+		members="$members glibc-$version/$(abilist_path "$arch")"
+	done
+	work=$cache/abilists.part
+	rm -rf "$work"
+	mkdir -p "$work"
+	say "extracting the abilists of glibc $version"
+	# shellcheck disable=SC2086
+	tar -xJf "$archive" -C "$work" $members ||
+		die "glibc $version does not have one of these files, and the paths are in bin/abilist"
+
+	for arch in $missing; do
+		mkdir -p "$into/$arch"
+		cp "$work/glibc-$version/$(abilist_path "$arch")" "$into/$arch/libc.abilist.part"
+		mv "$into/$arch/libc.abilist.part" "$into/$arch/libc.abilist"
+	done
+	rm -rf "$work"
+
+	# Where the description came from, beside the description. A comparison that fails is read by
+	# somebody who wants to know which glibc said this, and the answer being in the cache next to the
+	# file is the difference between answering that in a second and reading a script to find out.
+	printf 'glibc\t%s\t%s\t%s\n' "$version" "$want" "$url" >"$into/source"
+fi
+
+# One line per symbol, counting the GLIBC_PRIVATE ones that a stub leaves out, so this is the size of
+# the description rather than the size of the stub. The xtask side prints both.
+for arch in $arches; do
+	printf '%-10s %s lines\n' "$arch" "$(wc -l <"$into/$arch/libc.abilist" | tr -d ' ')"
+done
+say "the abilists of glibc $version are in $into"
+say "the compiler reads them from there as RUCC_ABILISTS=$into cargo xtask real-libc"
