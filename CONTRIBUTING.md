@@ -10,7 +10,15 @@ bin/compile-corpus
 bin/run-corpus
 ```
 
-That is the whole of it, and CI runs the same five commands. The last one needs qemu and prints `skipped` for every row it has no emulator for, which is every row on a mac.
+That is the whole of it, and CI runs the same five commands. The last one prints `skipped` for every row it has no way to run, which is every row on a mac and everything but this machine's own architecture on a Linux box with no qemu installed.
+
+To run the corpus with the compiler instead of the reference, build rucc and point `RUCC` at it:
+
+```
+RUCC=../rucc/target/release/rucc bin/run-corpus --cc rucc x86_64-linux-musl
+```
+
+That needs `bin/sysroot x86_64-linux-musl` to have been run first, and it needs a linker the compiler can find, which on a machine with no lld is a shim on the path that runs the pinned zig's. It is not in the gate, because CI here has no compiler checked out and a job that silently skips every row is a job that says nothing.
 
 If `bin/facts --check` fails, read the diff before you run `bin/facts --record`. A facts file changing means either the reference compiler moved or a target's definition did, and both are worth a sentence in the commit message. Recording a diff you did not read turns a finding into a fact.
 

@@ -25,7 +25,10 @@ report() {
 }
 
 markdown=$(find . -name '*.md' -not -path './.git/*' | sort)
-scripts="bin/compile-abi-corpus bin/compile-corpus bin/facts bin/lint bin/reference-cc bin/run-corpus bin/sysroot toolchains/install toolchains/record-hash"
+# Every file in the two script directories that says it is one, found rather than listed. A list
+# here would be a second place to remember a new script, and the thing it is remembered for is the
+# check that the script is executable, which is exactly the check a forgotten script escapes.
+scripts=$(grep -l '^#!/bin/sh' bin/* toolchains/* | sort)
 
 # An em dash or an en dash. The rule is that a sentence which needs one is a sentence that wanted a
 # comma, a colon, a period or the word "to", and picking one of those is the author's job.

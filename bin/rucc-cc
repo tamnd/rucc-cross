@@ -1,0 +1,38 @@
+#!/bin/sh
+# Run rucc for a target, against the sysroot this repository produced for it.
+#
+# usage: bin/rucc-cc <tuple> [argument]...
+#
+# The other side of bin/reference-cc. That script runs the reference and knows nothing about rucc,
+# and this one runs rucc and knows nothing about the reference, so a test that uses both is
+# comparing two independent answers rather than one answer with itself.
+#
+# RUCC names the compiler and defaults to `rucc` on the path. A checkout of the compiler builds one
+# at target/release/rucc, and pointing RUCC at it is how a change gets tested before it is released.
+#
+# The sysroot comes from the cache bin/sysroot writes into, and rucc reads `sysroots/<tuple>` under
+# whatever RUCC_CACHE_DIR says, which is the same path under the same name. That agreement is not a
+# coincidence: rucc-sysroot's layout is what bin/sysroot was written against, and the exit criterion
+# of the sysroot half of tamnd/rucc#619 is that the compiler reads what this repository produced
+# without either side being told twice where it is.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+
+die() { printf 'rucc-cc: %s\n' "$*" >&2; exit 1; }
+
+[ $# -ge 1 ] || die "usage: bin/rucc-cc <tuple> [argument]..."
+tuple=$1
+shift
+
+row=$(awk -F'\t' -v t="$tuple" '$1 == t' "$here/targets")
+[ -n "$row" ] || die "$tuple is not a row of the targets table"
+
+rucc=${RUCC:-rucc}
+command -v "$rucc" >/dev/null 2>&1 || die "$rucc is not on the path, so set RUCC to one that is"
+[ -d "$cache/sysroots/$tuple" ] ||
+	die "no sysroot for $tuple has been produced, so run bin/sysroot $tuple"
+
+RUCC_CACHE_DIR=$cache exec "$rucc" --target="$tuple" "$@"

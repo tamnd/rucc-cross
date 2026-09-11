@@ -27,7 +27,9 @@ bin/facts --check               fail if anything in facts/ has drifted
 bin/compile-corpus              compile the layout corpus for all forty two targets
 bin/compile-abi-corpus          compile the compiler's generated layout corpus, one file per target
 bin/compile-abi-signatures      compile the compiler's generated signature corpus, for every target
-bin/run-corpus                  build and run the executing corpus under qemu
+bin/run-corpus                  build and run the executing corpus, with the reference
+bin/run-corpus --cc rucc        the same corpus and the same transcripts, built by rucc
+bin/rucc-cc x86_64-linux-musl   run rucc against the sysroot produced for that target
 bin/run-abi-signatures          build the signature corpus with the reference and run it under qemu
 bin/sysroot aarch64-linux-musl  produce a musl sysroot, with a manifest
 bin/sysroot --check a b         compare two manifests, which is the reproducibility check
@@ -41,6 +43,10 @@ bin/lint                        the house rules
 `bin/run-abi-signatures` takes the same corpus and runs it. Both halves are built by the reference, which makes it the control build of the four the differential harness does rather than the differential itself, because the other three need rucc to emit code for the target and today it emits code for one. The control is worth running on every architecture anyway. A generated program is a program nobody read, and compiling it only catches the shapes the reference rejects: a value checked against the wrong promoted type, or a `long double` whose bit pattern differs between architectures, is a corpus bug that compiles fine everywhere and fails when it runs. Finding those here is much cheaper than finding them inside a differential where the answer is supposed to mean something about the compiler.
 
 It is also how each architecture's emulator gets characterized, which is what the known divergence list in `spec/cross-compile/14-testing.md` section 14.4 is made of. Every instruction in the binary came from the reference, so a crash is qemu and nothing else, and the number of crashes retried is printed at the end rather than swallowed. It skips the same rows `bin/run-corpus` skips and for the same reasons, so the two cover the same set and a target cannot quietly appear in one and not the other.
+
+`bin/run-corpus --cc rucc` is the other half of the comparison, and the first thing in this repository that runs the compiler rather than the reference. `bin/rucc-cc` is how: it wants `RUCC` pointing at a compiler, it wants a sysroot already produced for the row, and it gives rucc one cache directory and the target, because `rucc-sysroot` reads the same layout under the same name that `bin/sysroot` writes. Nothing else is passed, so a header that came from the machine instead of the sysroot would be a bug in the compiler's search path and not something this script arranged around. The reference stays the default, because a transcript recorded here has to come from something other than the compiler being tested before comparing anything against it means much.
+
+It says why it skipped a row, and with `--cc rucc` two of the reasons are about the compiler: a row nobody has produced a sysroot for, and a row whose architecture has no back end yet, which is every row that is not x86-64. A static binary for the machine's own architecture and kernel runs on hardware rather than under qemu, which is how x86_64-linux-musl gets tested on an x86-64 Linux box with no emulator installed at all.
 
 Set `RUCC_CROSS_REFERENCE=gcc` to compare against the platform's cross gcc instead of zig, for the rows where one exists. That column is much sparser than the zig one and the sparseness is the argument for this whole line of work: a per target gcc has to exist as a package before you can compare against it, and for most of the table nobody has built one.
 
