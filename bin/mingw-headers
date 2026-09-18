@@ -6,9 +6,10 @@
 #        bin/mingw-headers --check <manifest> <manifest>
 #
 # The Windows half of what bin/sysroot and bin/glibc-headers do for Linux. `x86_64-windows-gnu` is
-# the one Windows target that is ours to ship rather than one behind a licence wall, and it is still
-# unpublished, so every Windows build today names somebody's mingw-w64 installation on the command
-# line. This is the producer that stops it having to, which is the first rung of tamnd/rucc#1360.
+# the one Windows target that is ours to ship rather than one behind a licence wall, and this is the
+# producer of the tree a rucc release pins. The three archives in the sysroots-2026-09-18 release
+# came out of this script and bin/artifact, so a Windows build no longer has to name somebody's
+# mingw-w64 installation on the command line, which is the first rung of tamnd/rucc#1360.
 #
 # What it does, for each target: fetch the pinned mingw-w64 release from sysroots/manifest and verify
 # its hash, run `mingw-w64-headers/configure && make install` once per Windows architecture, check
