@@ -4,6 +4,14 @@ The format is a section per change, newest first, written by hand. There are no 
 
 ## Unreleased
 
+`bin/artifact` packs a produced sysroot into the archive a rucc release pins, and prints the target, the file name and the sha256, which are three of the four fields of a row in `rucc_sysroot::artifact`. That table is empty and its own documentation says why: nothing had published a file at a URL with a hash. This is the step that makes one, and the three windows-gnu rows are the first targets it has been run for.
+
+What comes out is what `rucc_driver::install` expects rather than a shape of our choosing. That side runs the platform's own `tar -xzf` and strips no component, so the archive is gzipped and `manifest`, `include` and `lib` are at the top of it rather than under a directory named after the target, since the staging directory it unpacks into is the thing already named after the target.
+
+The archive is reproducible, which matters more here than for most release artifacts because the sha256 of these bytes is what gets compiled into a rucc release. Four things a tar of a directory would otherwise carry from the machine it ran on are pinned down: the member order is sorted rather than the filesystem's, the modification times are zero, the owner and group are 0, and the permissions are normalised, because the directories come from `mkdir` and would otherwise carry the umask of whoever ran the producer. gzip is told not to write the file name and timestamp into its header for the same reason. Checked by packing all three windows-gnu sysroots on two hosts, as root on one and as an ordinary user on the other: the three archives are 8.4 MiB each and the six hashes are three pairs.
+
+It needs GNU tar, and that is checked rather than worked around, because `--sort` is a GNU option and the BSD tar on a mac has nothing that answers for it. An archive packed with an unsorted member list is an archive whose hash depends on a directory walk, which is the thing being prevented.
+
 `bin/mingw-headers` produces a mingw-w64 sysroot for the windows-gnu targets, out of the release now pinned in `sysroots/manifest`, which is mingw-w64 14.0.0. This is the Windows half of what `bin/sysroot` and `bin/glibc-headers` do for Linux and the first rung of tamnd/rucc#1360: `x86_64-windows-gnu` is the one Windows target that is ours to ship rather than one behind a licence wall, and it is still unpublished, so every Windows build today names somebody's mingw-w64 installation on the command line.
 
 There is no version multiplexing to do, which is the whole difference from glibc. mingw-w64 is one tree per release, the Windows API it declares is versioned inside the headers by `_WIN32_WINNT` rather than by which release the headers came from, and a program picks the level it wants with a macro. So this is one install and one publish, and the interesting questions are what the install is held to rather than how eight releases merge.
