@@ -1,0 +1,105 @@
+#!/bin/sh
+# Compare what a Windows header preprocesses to, against another tree and against another compiler.
+#
+# usage: bin/header-tokens <header>...
+#        bin/header-tokens --names <header>...
+#
+# The third rung of tamnd/rucc#1360. A produced mingw-w64 tree is only worth publishing if a program
+# that includes a header from it sees what it would have seen from an installation, and only worth
+# publishing for this compiler if rucc reads it the way gcc does. Those are two different questions
+# and this asks both, because their answers have to be read against each other: the tree we produce
+# is mingw-w64 14.0.0 and the one a distribution ships is several releases older, so a difference is
+# not a defect until it is known which of the two axes it came from.
+#
+# The tree axis is gcc against our tree and gcc against the installation on this machine. What that
+# measures is the Windows API growing, and the number it gives is the scale the other comparison is
+# read at rather than a number anybody has to act on.
+#
+# The compiler axis is rucc against our tree and gcc against our tree. One tree, one set of headers,
+# two compilers, so everything it reports is ours.
+#
+# The attribution is the part that makes either number mean anything. Comparing raw `-E` output is
+# useless: a compiler supplies its own headers as well as the tree's, gcc's `x86intrin.h` alone is
+# about 115,000 tokens of `windows.h`, and rucc's builtin set is a different size, so the comparison
+# comes out as a verdict on whose intrinsics headers are longer. So every token is attributed to the
+# file the line marker above it names, and only the tokens from the tree being compared are counted.
+#
+# A token here is a run of non-whitespace, which is cruder than the standard's and is deliberate. The
+# two preprocessors put spaces in different places inside a macro expansion, so `__attribute__((x))`
+# is one token from one and three from the other, and splitting on punctuation as well makes `diff`
+# resynchronise so badly that the report is ten thousand hunks of nothing. What is compared instead
+# is the sorted multiset, which is insensitive to where a declaration moved to and still counts
+# every word that is in one output and not the other.
+#
+# --names prints the words behind the counts, most frequent first, which is what turns a number into
+# a finding: `EndTask` and six `I_Rpc` declarations only gcc had is a missing `WINNT`, and `"=@ccc"`
+# against `setc` is the flag output constraint that rucc does not implement and gcc announces with
+# `__GCC_ASM_FLAG_OUTPUTS__`.
+
+set -eu
+
+cache=${RUCC_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc}
+target=${TARGET:-x86_64-windows-gnu}
+gcc=${GCC:-x86_64-w64-mingw32-gcc}
+rucc=${RUCC:-rucc}
+ours=${OURS:-$cache/sysroots/$target/include/generic}
+real=${REAL:-/usr/share/mingw-w64/include}
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "header-tokens: $*"; exit 1; }
+
+names=false
+case ${1:-} in
+--names) names=true; shift ;;
+esac
+
+[ $# -gt 0 ] || die "usage: bin/header-tokens [--names] <header>..."
+command -v "$gcc" >/dev/null 2>&1 || die "no $gcc on the path, and it is the other compiler"
+command -v "$rucc" >/dev/null 2>&1 || die "no $rucc on the path"
+[ -d "$ours" ] || die "$ours does not exist, so nothing has produced or fetched the tree yet"
+[ -d "$real" ] || die "$real does not exist, so there is no installation to compare against"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# gcc's own headers, which both of its runs get and neither run counts. -nostdinc is what stops it
+# reaching the installation as well as the tree it was told to read.
+own="-isystem $($gcc -print-file-name=include) -isystem $($gcc -print-file-name=include-fixed)"
+
+# Attribute each token to the file the line marker above it names, and keep the ones from $1.
+attribute() {
+	awk -v keep="$1" '
+		/^# [0-9]+ "/ { match($0, /"[^"]*"/); file = substr($0, RSTART + 1, RLENGTH - 2); next }
+		{ if (index(file, keep) == 1) print }
+	' | tr -s '[:space:]' '\n' | sed '/^$/d' | sort
+}
+
+report() {
+	left=$1
+	right=$2
+	what=$3
+	printf '  %-22s %-8s %-8s only-left=%-6s only-right=%s\n' \
+		"$what" "$(wc -l <"$left" | tr -d ' ')" "$(wc -l <"$right" | tr -d ' ')" \
+		"$(comm -23 "$left" "$right" | wc -l | tr -d ' ')" \
+		"$(comm -13 "$left" "$right" | wc -l | tr -d ' ')"
+	if $names; then
+		comm -23 "$left" "$right" | uniq -c | sort -rn | head -20 | sed 's/^/      left  /'
+		comm -13 "$left" "$right" | uniq -c | sort -rn | head -20 | sed 's/^/      right /'
+	fi
+}
+
+for header in "$@"; do
+	printf '#include <%s>\n' "$header" >"$work/one.c"
+	# shellcheck disable=SC2086
+	$gcc -E -nostdinc $own -isystem "$ours" "$work/one.c" |
+		attribute "$ours" >"$work/gcc-ours"
+	# shellcheck disable=SC2086
+	$gcc -E -nostdinc $own -isystem "$real" "$work/one.c" |
+		attribute "$real" >"$work/gcc-real"
+	# Nothing on the command line but the target, which is the rung this is here to check.
+	"$rucc" "--target=$target" -E "$work/one.c" | attribute "$ours" >"$work/rucc-ours"
+
+	printf '%s\n' "$header"
+	report "$work/gcc-ours" "$work/gcc-real" "tree: ours, install"
+	report "$work/gcc-ours" "$work/rucc-ours" "compiler: gcc, rucc"
+done
