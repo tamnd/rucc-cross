@@ -1,0 +1,264 @@
+#!/bin/sh
+# Produce a mingw-w64 sysroot for a Windows target, laid out the way rucc-sysroot reads one.
+#
+# usage: bin/mingw-headers <target>...
+#        bin/mingw-headers --force <target>...
+#        bin/mingw-headers --check <manifest> <manifest>
+#
+# The Windows half of what bin/sysroot and bin/glibc-headers do for Linux. `x86_64-windows-gnu` is
+# the one Windows target that is ours to ship rather than one behind a licence wall, and it is still
+# unpublished, so every Windows build today names somebody's mingw-w64 installation on the command
+# line. This is the producer that stops it having to, which is the first rung of tamnd/rucc#1360.
+#
+# What it does, for each target: fetch the pinned mingw-w64 release from sysroots/manifest and verify
+# its hash, run `mingw-w64-headers/configure && make install` once per Windows architecture, check
+# that the installs are the same tree, and lay one of them out as include/generic with a version 3
+# manifest beside it.
+#
+# There is no version multiplexing to do, which is the whole difference from glibc. mingw-w64 is one
+# tree per release, the Windows API it declares is versioned inside the headers by `_WIN32_WINNT`
+# rather than by which release the headers came from, and a program picks the level it wants with a
+# macro. So one install and one publish, and the interesting questions are what the install is held
+# to rather than how eight releases merge.
+#
+# There is no per architecture split either, and that is measured rather than taken from the
+# documentation. Installing the headers for x86_64-w64-mingw32, i686-w64-mingw32 and
+# aarch64-w64-mingw32 gives three trees of 1702 files that `diff -rq` finds no difference between, so
+# every file goes in include/generic and include/<arch> does not exist. The three installs are run on
+# every production and compared rather than being trusted once, because the day a release starts
+# splitting is the day this has to stop publishing one tree, and four seconds an install is a cheap
+# way to be told.
+#
+# The one thing that is not left at the release default is the C runtime. mingw-w64 v14 defaults to
+# ucrt, and the compiler's own Windows link line names libmsvcrt.a, so the headers are configured
+# with --with-default-msvcrt=msvcrt to match it. A tree configured for one runtime and linked against
+# the other disagrees about `printf` and about every wide character function, and the disagreement is
+# a macro in _mingw.h rather than anything a linker would catch.
+#
+# What is missing is the import libraries, which are the other half of the same problem and are named
+# here so that nobody reads this and thinks a Windows sysroot is done. mingw-w64 ships several
+# hundred of them, tamnd/rucc#732 already generates stubs for the same DLLs, and whether the published
+# sysroot carries the generated stubs or the real archives is the question tamnd/rucc#1360 leaves
+# open. The lib directory is created empty so that the shape is the shape a sysroot has.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced sysroot
+# survives a branch switch. Producing one that is already there is a no-op unless --force is given.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "mingw-headers: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# Every architecture mingw-w64 has a port for, which is the set the identity check runs over. Not
+# read out of the targets table, because the table's gcc column is the Debian cross compiler prefix
+# and Debian packages no aarch64 mingw, so aarch64-windows-gnu has a dash there and a port here.
+all="x86_64-w64-mingw32 i686-w64-mingw32 aarch64-w64-mingw32"
+
+# mingw-w64's spelling of a target, which is the --host its configure wants. The rows are the
+# windows-gnu rows of the targets table, and a target that is not one of them is not something this
+# produces: the msvc rows are behind the microsoft-sdk wall and have no mingw tree to be published.
+mingw_host() {
+	case $1 in
+	x86_64-windows-gnu) printf 'x86_64-w64-mingw32\n' ;;
+	i686-windows-gnu) printf 'i686-w64-mingw32\n' ;;
+	aarch64-windows-gnu) printf 'aarch64-w64-mingw32\n' ;;
+	*) die "$1 is not one of the windows-gnu targets in the targets table" ;;
+	esac
+}
+
+# Fetch and unpack the pinned mingw-w64 release once, shared by every target, and print where it
+# went. The same shape bin/sysroot uses for musl, and the same rule: nothing is fetched without a
+# hash and nothing is fetched from a URL that is not on a line of sysroots/manifest.
+mingw_source() {
+	line=$(awk -F'\t' '$1 == "mingw-w64" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no mingw-w64 line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/mingw-w64-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+# Whether the bytes of one installed file can be found in the upstream release, which is the test
+# `Provenance` in rucc-sysroot applies. Bundled when they can, generated when this toolchain wrote
+# them.
+#
+# Measured rather than assumed, the same way bin/sysroot measured musl's: hashing every file in the
+# mingw-w64 v14.0.0 release and looking up each installed file's hash in that set says that of the
+# 1702 installed headers, 1701 are upstream's byte for byte and one is not. The one is _mingw.h,
+# which configure generates from _mingw.h.in, and the two lines it substitutes are the two answers
+# this script chose: `__MSVCRT_VERSION__ 0x600` for the msvcrt runtime and `_WIN32_WINNT 0xa00` for
+# the Windows 10 API level that the release defaults to.
+#
+# The lib rule is for the half that is not here yet. Whatever ends up in it, generated stubs or
+# mingw's own archives, will be produced by a toolchain rather than unpacked from the release.
+provenance_of() {
+	case $1 in
+	lib/*) printf 'generated\n' ;;
+	*/_mingw.h) printf 'generated\n' ;;
+	*) printf 'bundled\n' ;;
+	esac
+}
+
+# Everything under a directory, hashed, as manifest lines. Sorted in the C locale because that is
+# the order rucc-sysroot renders a manifest in, and a manifest that came out in the filesystem's
+# order would report a difference between two identical sysroots.
+#
+# The names here are all prefixed for the reason bin/sysroot's are: sh has no local variables that
+# every sh agrees on, and this is called from the middle of produce() with a redirect rather than in
+# a subshell, so a plain `root=$1` would overwrite the caller's.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_url=$3
+	walk_licence=$4
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_source" "$walk_url" "$(sha256 "$walk_file")" \
+				"$walk_licence" "$(provenance_of "$walk_file")"
+		done
+	)
+}
+
+produce() {
+	target=$1
+	host=$(mingw_host "$target")
+	root=$cache/sysroots/$target
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "$target is already produced in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	source=$(mingw_source)
+	version=$(basename "$source" | sed 's/^mingw-w64-//')
+	licence=$(awk -F'\t' '$1 == "mingw-w64" { print $3; exit }' "$pins")
+	url=$(awk -F'\t' '$1 == "mingw-w64" { print $5; exit }' "$pins")
+
+	# One install per architecture, out of tree, so that three configures share one unpacked release
+	# without writing over each other's config.status. No compiler of any kind is needed: installing
+	# these headers is configure substituting two lines into _mingw.h and make copying files, which is
+	# why there is no zig in this script even though the target is a Windows one.
+	work=$cache/sysroots/$target.build
+	rm -rf "$work" "$root.part"
+	mkdir -p "$work"
+	for one in $all; do
+		say "installing the $one headers of mingw-w64 $version"
+		mkdir -p "$work/build-$one"
+		(
+			cd "$work/build-$one" || exit 1
+			"$source/mingw-w64-headers/configure" --host="$one" --prefix="$work/install-$one" \
+				--with-default-msvcrt=msvcrt >"$work/$one.configure.log" 2>&1 ||
+				{ tail -20 "$work/$one.configure.log" >&2; exit 1; }
+			make -s install >"$work/$one.make.log" 2>&1 ||
+				{ tail -20 "$work/$one.make.log" >&2; exit 1; }
+		) || die "the $one headers did not install, and the logs are in $work"
+		[ -f "$work/install-$one/include/windows.h" ] ||
+			die "the $one install has no windows.h, so it is not the tree this publishes"
+	done
+
+	# The check that earns the layout below. Three architectures, one tree, and if that ever stops
+	# being true then include/generic is the wrong place for the files that differ and somebody has to
+	# split them the way bin/glibc-headers splits a family out. A failure here is that day rather than
+	# a broken build, so it names the files.
+	first=$(printf '%s' "$all" | awk '{ print $1 }')
+	for one in $all; do
+		if [ "$one" = "$first" ]; then
+			continue
+		fi
+		diff -rq "$work/install-$first/include" "$work/install-$one/include" >"$work/$one.diff" 2>&1 ||
+			{ head -20 "$work/$one.diff" >&2 || true; die "$first and $one install different headers, so one tree cannot serve both"; }
+	done
+
+	# Section 8.3's split, with nothing on the architecture side of it. The compiler searches
+	# include/<arch> before include/generic and a mingw tree has no include/<arch> at all, which is a
+	# missing directory in the search path rather than an empty one, because a directory that exists
+	# and holds nothing is a claim that the split was made and came out empty.
+	mkdir -p "$root.part/include" "$root.part/lib"
+	cp -R "$work/install-$host/include" "$root.part/include/generic"
+
+	# Version 3 of the format, which is the one rucc-sysroot reads. No kernel line, which is not an
+	# omission: that line names the Linux release a sysroot was produced beside and Windows has no
+	# system call headers of anybody's to be produced beside.
+	{
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		manifest_lines "$root.part" "mingw-w64-$version" "$url" "$licence"
+	} >"$root.part/manifest"
+
+	rm -rf "$root" "$work"
+	mv "$root.part" "$root"
+	say "$target is in $root, $(grep -c '' "$root/manifest") manifest lines, \
+$(du -sk "$root" | cut -f1)K"
+	printf '%s\n' "$root/manifest"
+}
+
+# Compare two manifests and say what differs, which is the reproducibility check. Two hosts, one
+# pinned release, one argument list, and the two records have to be the same file.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+[ $# -gt 0 ] || die "usage: bin/mingw-headers <target>... or bin/mingw-headers --check <manifest> <manifest>"
+
+case $1 in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/mingw-headers --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	shift
+	[ $# -gt 0 ] || die "usage: bin/mingw-headers --force <target>..."
+	for target in "$@"; do produce "$target"; done
+	;;
+-*) die "unknown option $1" ;;
+*)
+	for target in "$@"; do produce "$target"; done
+	;;
+esac
