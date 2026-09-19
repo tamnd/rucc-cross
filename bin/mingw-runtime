@@ -1,0 +1,340 @@
+#!/bin/sh
+# Produce the mingw-w64 runtime and import libraries for a Windows target, into the lib directory
+# bin/mingw-headers leaves empty.
+#
+# usage: bin/mingw-runtime <target>...
+#        bin/mingw-runtime --force <target>...
+#        bin/mingw-runtime --check <manifest> <manifest>
+#
+# The other half of the problem bin/mingw-headers names and stops in front of. That script publishes
+# a header tree and creates lib/ empty on purpose, so the shape is the shape a sysroot has, and the
+# result is a sysroot that compiles a Windows program and links nothing. This fills the directory, so
+# that a Windows build stops needing somebody's mingw-w64 installation on the command line. It is the
+# Windows counterpart of bin/glibc-startfiles: headers are one script and the code a link needs is
+# another, because they have almost nothing in common except where they put the result.
+#
+# rucc names ten files on a Windows link line, in crates/rucc-sysroot/src/link.rs. The start file is
+# crt2.o, or dllcrt2.o for a shared object, and then come libmingw32.a, libmoldname.a, libmingwex.a,
+# libmsvcrt.a, libadvapi32.a, libshell32.a, libuser32.a, libkernel32.a and librucc_builtins.a. The
+# last one the compiler builds itself and the other nine are mingw-w64's.
+#
+# The real archives rather than generated stubs, which is the question tamnd/rucc#1360 left open and
+# tamnd/rucc#1513 answers. Four of the nine are not import libraries and no stub generator can
+# produce them: crt2.o is compiled machine code that calls __main and then main, libmingw32.a and
+# libmoldname.a are compiled support code, and libmingwex.a is 3.8 MB of the C library mingw-w64
+# supplies over what msvcrt has. Once mingw-w64-crt is building for those, the several hundred import
+# libraries come out of the same make install for nothing, and shipping all of them is what lets
+# somebody write -lws2_32 or -lole32 and have it work. The whole lib directory is 938 files and 50 MB
+# installed, and it takes the published x86_64 archive from 8.4 MiB to 15.2 MiB, so there is no size
+# argument for carrying a subset.
+#
+# The compiler is the pinned zig, behind five wrapper scripts named the way mingw-w64's build expects
+# to find a cross toolchain: x86_64-w64-mingw32-gcc, -ar, -ranlib, -dlltool and -as. That is the same
+# trick bin/glibc-startfiles uses and for the same reason, which is that the recipe stays upstream's
+# and only the compiler underneath it is ours. dlltool is the one that would be a problem with any
+# other compiler and is not one here, because zig ships llvm-dlltool and mingw-w64 has accepted it
+# for years.
+#
+# Two things the wrapper has to do that bin/glibc-startfiles does not. mingw-w64-crt puts -w and
+# -Wp,-w on command lines and zig 0.16 answers "unsupported preprocessor arg" to both, so the wrapper
+# drops them; they only ask for warnings to be quiet and nothing about the output depends on them.
+# And a run that stops partway leaves zero byte .def files behind in the build tree, because dlltool
+# writes the file before it fills it, after which the next run stops with "definition file empty" on
+# whichever import library it reached first. So the build tree is cleared of empty .def files before
+# make runs rather than being trusted to be clean.
+#
+# --with-default-msvcrt=msvcrt, matching the headers. mingw-w64 v14 defaults to ucrt and the
+# compiler's link line names libmsvcrt.a, and bin/mingw-headers already configures the header tree
+# for msvcrt for that reason. Configuring the two halves differently is not a link error, it is a
+# program that disagrees with itself about printf.
+#
+# The import libraries this produces need lld 19 or newer to link. mingw-w64 writes a few hundred
+# aliases in its .def files with the == syntax, which says the program sees one name and the DLL is
+# asked for another, as in _crt_atexit == atexit in lib-common/msvcrt.def.in and strcmpi == _stricmp
+# in def-include/crt-aliases.def.in. llvm-dlltool records that with IMPORT_NAME_EXPORTAS, which is
+# the encoding the PE format has for it and the one llvm-mingw has shipped for years, and lld learned
+# to read it in 19. lld 18 does not refuse it. It writes an import by ordinal zero instead, so the
+# program links, and then dies at startup under wine with "unimplemented function msvcrt.dll.0".
+# Ubuntu 24.04 still ships lld 18, so this is worth knowing before somebody spends an afternoon on
+# it. GNU ld is not an answer either, because it refuses one of these archives outright with "file
+# format not recognized".
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. Producing a runtime that is
+# already there is a no-op unless --force is given.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+jobs=${RUCC_CROSS_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)}
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "mingw-runtime: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The pinned zig, read out of toolchains/manifest, the same way bin/glibc-startfiles reads it.
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+# mingw-w64's spelling of a target, zig's spelling of the same target, and the one machine library
+# mingw-w64-crt's configure has to be told to build. Three columns rather than three functions
+# because they are only ever read together and a target missing from one is missing from all three.
+#
+# zig calls the 32-bit x86 machine x86 and mingw-w64 calls it i686, which is the only place the two
+# spellings disagree.
+#
+# The third column names one of the four --enable-libNN options and produce() turns the other three
+# off by hand, which is not belt and braces. mingw-w64-crt is written for a multilib gcc and decides
+# for itself what a host can also build, so an x86_64 configure that was only told --enable-lib64
+# builds the 32-bit library as well, and then hands clang a file whose inline assembly is ambiguous
+# at 32 bits and stops on `pushfw or pushfl`. One machine per sysroot is what this produces, so one
+# is turned on and three are turned off and nothing is left to the host.
+mingw_row() {
+	case $1 in
+	x86_64-windows-gnu) printf 'x86_64-w64-mingw32\tx86_64-windows-gnu\tlib64\n' ;;
+	i686-windows-gnu) printf 'i686-w64-mingw32\tx86-windows-gnu\tlib32\n' ;;
+	aarch64-windows-gnu) printf 'aarch64-w64-mingw32\taarch64-windows-gnu\tlibarm64\n' ;;
+	*) die "$1 is not one of the windows-gnu targets in the targets table" ;;
+	esac
+}
+
+# The pinned mingw-w64 release, unpacked, shared by every target. The same function bin/mingw-headers
+# has, so a machine that has produced the headers already has the source and this fetches nothing.
+mingw_source() {
+	line=$(awk -F'\t' '$1 == "mingw-w64" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no mingw-w64 line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/mingw-w64-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+# The same rule bin/mingw-headers writes, because the two scripts produce one manifest between them
+# and this is the one that writes it last. _mingw.h is configure's substitution of two lines into
+# _mingw.h.in, and everything under lib is machine code this toolchain compiled, so neither is
+# upstream's bytes and both are generated.
+provenance_of() {
+	case $1 in
+	lib/*) printf 'generated\n' ;;
+	*/_mingw.h) printf 'generated\n' ;;
+	*) printf 'bundled\n' ;;
+	esac
+}
+
+# Everything under a directory, hashed, as manifest lines, in the C locale order rucc-sysroot renders
+# a manifest in. The prefixed names are for the reason bin/mingw-headers gives: this is called from
+# the middle of produce() with a redirect rather than in a subshell.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_url=$3
+	walk_licence=$4
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$walk_file" "$walk_source" "$walk_url" "$(sha256 "$walk_file")" \
+				"$walk_licence" "$(provenance_of "$walk_file")"
+		done
+	)
+}
+
+# The five names mingw-w64's build looks for on a cross toolchain, written into a directory that goes
+# on the front of PATH. Everything here is the pinned zig wearing a different name.
+#
+# -as is zig cc -c rather than an assembler, which is what it has to be: mingw-w64 hands .S files to
+# it and expects the preprocessor to have run. -g0 goes on the compiler for the reason
+# bin/glibc-startfiles gives, which is that debug information carries the build directory into the
+# output and two hosts then cannot produce the same bytes. It is also most of the size: the same 938
+# files are 81 MB built with mingw-w64's default -g and 50 MB without.
+#
+# The prefixed names are for the reason bin/mingw-headers gives about manifest_lines, which is that
+# sh has no local variables every sh agrees on and this is called from the middle of produce().
+write_tools() {
+	tool_bin=$1
+	tool_zig=$2
+	tool_target=$3
+	tool_host=$4
+	mkdir -p "$tool_bin"
+
+	{
+		printf '#!/bin/sh\nzig=%s\ntarget=%s\n' "$tool_zig" "$tool_target"
+		cat <<'SH'
+
+args=
+for argument in "$@"; do
+	case $argument in
+	-w | -Wp,-w) ;;
+	*) args="$args $argument" ;;
+	esac
+done
+
+exec "$zig" cc -target "$target" -Wno-unused-command-line-argument $args -g0
+SH
+	} >"$tool_bin/$tool_host-gcc"
+
+	printf '#!/bin/sh\nexec %s cc -target %s -c "$@"\n' "$tool_zig" "$tool_target" \
+		>"$tool_bin/$tool_host-as"
+	printf '#!/bin/sh\nexec %s ar "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-ar"
+	printf '#!/bin/sh\nexec %s ranlib "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-ranlib"
+	printf '#!/bin/sh\nexec %s dlltool "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-dlltool"
+
+	chmod +x "$tool_bin/$tool_host-gcc" "$tool_bin/$tool_host-as" "$tool_bin/$tool_host-ar" \
+		"$tool_bin/$tool_host-ranlib" "$tool_bin/$tool_host-dlltool"
+}
+
+produce() {
+	target=$1
+	row=$(mingw_row "$target")
+	host=$(printf '%s' "$row" | cut -f1)
+	triple=$(printf '%s' "$row" | cut -f2)
+	machine=$(printf '%s' "$row" | cut -f3)
+	root=$cache/sysroots/$target
+
+	[ -d "$root/include/generic" ] ||
+		die "$root has no include/generic, so run bin/mingw-headers $target first"
+
+	if [ -f "$root/lib/libmingwex.a" ] && [ -z "$force" ]; then
+		say "$target already has a runtime in $root/lib"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	source=$(mingw_source)
+	version=$(basename "$source" | sed 's/^mingw-w64-//')
+	licence=$(awk -F'\t' '$1 == "mingw-w64" { print $3; exit }' "$pins")
+	url=$(awk -F'\t' '$1 == "mingw-w64" { print $5; exit }' "$pins")
+	z=$(zig)
+
+	# The staging prefix is a sysroot in mingw-w64's layout rather than in ours: configure's
+	# --with-sysroot reads DIR/include and our tree splits that into include/generic. So the headers
+	# are copied flat into the staging prefix, the build writes its lib beside them, and only the lib
+	# is taken back out. Copying rather than symlinking because the build reads these thousands of
+	# times and a link that pointed into the cache would make the build depend on the cache staying
+	# still for the twenty minutes it runs.
+	work=$cache/sysroots/$target.runtime
+	rm -rf "$work" "$root.part"
+	mkdir -p "$work/build" "$work/install"
+	cp -R "$root/include/generic" "$work/install/include"
+	write_tools "$work/bin" "$z" "$triple" "$host"
+
+	say "building the mingw-w64 $version runtime for $target with zig"
+	(
+		PATH=$work/bin:$PATH
+		export PATH
+		cd "$work/build" || exit 1
+		set -- --host="$host" --prefix="$work/install" --with-sysroot="$work/install" \
+			--with-default-msvcrt=msvcrt --disable-dependency-tracking
+		for one in lib32 lib64 libarm32 libarm64; do
+			if [ "$one" = "$machine" ]; then
+				set -- "$@" "--enable-$one"
+			else
+				set -- "$@" "--disable-$one"
+			fi
+		done
+		"$source/mingw-w64-crt/configure" "$@" >"$work/configure.log" 2>&1 ||
+			{ tail -30 "$work/configure.log" >&2; exit 1; }
+		find . -name '*.def' -empty -delete
+		make -j"$jobs" >"$work/make.log" 2>&1 ||
+			{ tail -30 "$work/make.log" >&2; exit 1; }
+		make -s install >"$work/install.log" 2>&1 ||
+			{ tail -30 "$work/install.log" >&2; exit 1; }
+	) || die "the $target runtime did not build, and the logs are in $work"
+
+	# The nine files the compiler's link line names, checked one at a time rather than by counting
+	# what came out. A crt build that configured itself for no architecture installs an empty lib and
+	# exits 0, and a release that renames one of these is a link failure in the compiler with nothing
+	# here to point at it.
+	for one in crt2.o dllcrt2.o libmingw32.a libmoldname.a libmingwex.a libmsvcrt.a \
+		libadvapi32.a libshell32.a libuser32.a libkernel32.a; do
+		[ -s "$work/install/lib/$one" ] ||
+			die "the $target build installed no $one, which crates/rucc-sysroot/src/link.rs names"
+	done
+
+	mkdir -p "$root.part/include"
+	cp -R "$root/include/generic" "$root.part/include/generic"
+	cp -R "$work/install/lib" "$root.part/lib"
+
+	# Version 3 of the format, rewritten whole rather than appended to, because the manifest is one
+	# record of one sysroot and the lib lines belong in the same C locale order as the include ones.
+	{
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		manifest_lines "$root.part" "mingw-w64-$version" "$url" "$licence"
+	} >"$root.part/manifest"
+
+	rm -rf "$root" "$work"
+	mv "$root.part" "$root"
+	say "$target is in $root, $(grep -c '' "$root/manifest") manifest lines, \
+$(du -sk "$root" | cut -f1)K"
+	printf '%s\n' "$root/manifest"
+}
+
+# Compare two manifests and say what differs, which is the reproducibility check bin/mingw-headers
+# has for the header half. Two hosts, one pinned release, one argument list, and the two records have
+# to be the same file.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+[ $# -gt 0 ] || die "usage: bin/mingw-runtime <target>... or bin/mingw-runtime --check <manifest> <manifest>"
+
+case $1 in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/mingw-runtime --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	shift
+	[ $# -gt 0 ] || die "usage: bin/mingw-runtime --force <target>..."
+	for target in "$@"; do produce "$target"; done
+	;;
+-*) die "unknown option $1" ;;
+*)
+	for target in "$@"; do produce "$target"; done
+	;;
+esac
