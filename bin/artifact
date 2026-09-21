@@ -2,6 +2,7 @@
 # Pack a produced sysroot into the archive a rucc release pins, and print what the pin has to say.
 #
 # usage: bin/artifact <target>...
+#        bin/artifact --against <PROVENANCE> <target>...
 #
 # The last step of producing a sysroot and the first step of shipping one. `rucc_sysroot::artifact`
 # in the compiler is a table of one URL and one sha256 per target, and its own documentation says it
@@ -33,6 +34,16 @@
 # The cache is $RUCC_CROSS_CACHE, the same one the producers write into, and the archives land in
 # artifacts/ beside sysroots/ rather than inside the tree they are made of, because a sysroot that
 # contained its own archive would not hash to what its manifest says.
+
+# --against is the other direction: it takes the compiler's PROVENANCE, which is the release's own
+# list of what it pins, and asks whether the archive this machine just packed is the file named
+# there. That is the question the reproducibility rule of document 13 section 13.6 actually rests on,
+# and until it is asked every night the pin is a hash somebody pasted once. Holding a fresh build
+# against a fixed published hash is a stronger check than holding two fresh builds against each
+# other, because two runs can agree on the wrong thing and neither of them can drift away from the
+# bytes people are downloading without this noticing. PROVENANCE is the right file to read rather
+# than the Rust table behind it: it is generated from that table, it is committed, and it is tab
+# separated, so this needs no toolchain to parse and no copy of the pins that could fall behind.
 
 set -eu
 
@@ -84,8 +95,63 @@ pack() {
 		"$target" "$(basename "$out")" "$(sha256 "$out")" "$(du -k "$out" | cut -f1)K"
 }
 
-[ $# -gt 0 ] || die "usage: bin/artifact <target>..."
+# The field of PROVENANCE's row for one target, or nothing if the release pins nothing for it. One
+# call per field rather than one call returning the row, because splitting a tab separated line back
+# up in the shell is the sort of thing that works until a value is empty.
+pinned() {
+	awk -F'\t' -v t="$2" -v n="$3" \
+		'$1 == "target" && $2 == t && $3 == "pinned" { print $n; exit }' "$1"
+}
 
-for one in "$@"; do
-	pack "$one"
-done
+# One target's archive against the row PROVENANCE has for it. A target with no row is not a failure
+# and is reported as such, because the table is allowed to pin fewer targets than this repository can
+# produce and a producer running ahead of a publisher is the normal order of things. A row whose file
+# name is not the one packed here is a failure, since a pin that points at a differently named file
+# is a pin at something else.
+against() {
+	provenance=$1
+	target=$2
+	out=$cache/artifacts/rucc-sysroot-$target.tar.gz
+	[ -f "$out" ] || die "$out has not been packed, so there is nothing to hold against the pin"
+
+	url=$(pinned "$provenance" "$target" 4)
+	want=$(pinned "$provenance" "$target" 5)
+	if [ -z "$want" ]; then
+		say "$target: $provenance pins nothing for it, so there is nothing to compare"
+		return 0
+	fi
+
+	[ "${url##*/}" = "rucc-sysroot-$target.tar.gz" ] ||
+		die "$target: the pinned URL names ${url##*/} and this packs rucc-sysroot-$target.tar.gz"
+
+	have=$(sha256 "$out")
+	if [ "$have" = "$want" ]; then
+		say "$target: reproduces the pinned artifact, $want"
+		return 0
+	fi
+	say "$target: this machine packed $have and $provenance pins $want"
+	say "$target: the pinned file is $url"
+	return 1
+}
+
+case ${1:-} in
+--against)
+	[ $# -ge 3 ] || die "usage: bin/artifact --against <PROVENANCE> <target>..."
+	provenance=$2
+	[ -f "$provenance" ] || die "$provenance is not a file"
+	shift 2
+	bad=
+	for one in "$@"; do
+		against "$provenance" "$one" || bad=yes
+	done
+	[ -z "$bad" ] || die "a produced archive is not the one the compiler pins"
+	;;
+"")
+	die "usage: bin/artifact <target>..."
+	;;
+*)
+	for one in "$@"; do
+		pack "$one"
+	done
+	;;
+esac
