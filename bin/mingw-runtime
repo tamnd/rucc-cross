@@ -4,6 +4,7 @@
 #
 # usage: bin/mingw-runtime <target>...
 #        bin/mingw-runtime --force <target>...
+#        bin/mingw-runtime --twice <target>
 #        bin/mingw-runtime --check <manifest> <manifest>
 #
 # The other half of the problem bin/mingw-headers names and stops in front of. That script publishes
@@ -182,6 +183,18 @@ manifest_lines() {
 # output and two hosts then cannot produce the same bytes. It is also most of the size: the same 938
 # files are 81 MB built with mingw-w64's default -g and 50 MB without.
 #
+# -g0 is not enough on its own, and the wrapper does one more thing for the same reason. clang puts
+# a .debug$S section in every COFF object whether or not debug information was asked for, holding an
+# S_OBJNAME record naming the object it is writing and an S_COMPILE3 record naming itself. zig cc
+# compiles into its own cache and copies the result to -o, so the name in that record is
+# <zig cache>/tmp/<token>-<file>.obj, which carries the home directory of whoever ran the build and a
+# token that is fresh every run. That is why 78 of the 938 files differed between two hosts, and it
+# was the only reason any of them did. Pinning the cache directory does not fix it, because the token
+# stays random, and no -g flag suppresses the section. -Xclang -object-file-name= sets the record to
+# the empty string, which is what clang writes when its driver does not pass the option at all, so
+# the objects come out the same bytes on every host. The -as wrapper needs none of this, because an
+# assembly input produces no .debug$S at all. tamnd/rucc-cross#30.
+#
 # The prefixed names are for the reason bin/mingw-headers gives about manifest_lines, which is that
 # sh has no local variables every sh agrees on and this is called from the middle of produce().
 write_tools() {
@@ -203,7 +216,8 @@ for argument in "$@"; do
 	esac
 done
 
-exec "$zig" cc -target "$target" -Wno-unused-command-line-argument $args -g0
+exec "$zig" cc -target "$target" -Wno-unused-command-line-argument $args -g0 \
+	-Xclang -object-file-name=
 SH
 	} >"$tool_bin/$tool_host-gcc"
 
@@ -303,6 +317,24 @@ $(du -sk "$root" | cut -f1)K"
 	printf '%s\n' "$root/manifest"
 }
 
+# Build a target twice on this machine and compare the two manifests, which is the reproducibility
+# check that needs one machine rather than two. --check is the stronger question and stays the real
+# one, because two hosts differ in ways one host cannot show, but it needs two hosts and a way to
+# carry a manifest between them, so it gets asked rarely. Nearly everything that has broken this
+# property broke it between two runs as well, since what varied was something the toolchain made up
+# rather than something about the machine: the zig cache token in tamnd/rucc-cross#30 was fresh on
+# every invocation, so one machine building twice would have found it. Two builds is what it costs.
+twice() {
+	twice_target=$1
+	twice_root=$cache/sysroots/$twice_target
+	force=yes
+
+	produce "$twice_target" >/dev/null
+	cp "$twice_root/manifest" "$twice_root.first"
+	produce "$twice_target" >/dev/null
+	check "$twice_root.first" "$twice_root/manifest"
+}
+
 # Compare two manifests and say what differs, which is the reproducibility check bin/mingw-headers
 # has for the header half. Two hosts, one pinned release, one argument list, and the two records have
 # to be the same file.
@@ -323,6 +355,10 @@ check() {
 [ $# -gt 0 ] || die "usage: bin/mingw-runtime <target>... or bin/mingw-runtime --check <manifest> <manifest>"
 
 case $1 in
+--twice)
+	[ $# -eq 2 ] || die "usage: bin/mingw-runtime --twice <target>"
+	twice "$2"
+	;;
 --check)
 	[ $# -eq 3 ] || die "usage: bin/mingw-runtime --check <manifest> <manifest>"
 	check "$2" "$3"
