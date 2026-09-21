@@ -3,6 +3,7 @@
 # rucc-sysroot searches a sysroot.
 #
 # usage: bin/glibc-headers
+#        bin/glibc-headers --release <version>
 #        bin/glibc-headers --force
 #        bin/glibc-headers --check <manifest> <manifest>
 #
@@ -24,13 +25,27 @@
 # that reassembles that tree out of its own split, which is one more check on it.
 #
 # The compiler is the pinned zig for the same reason bin/sysroot uses it: a header tree installed by
-# whatever was on the machine is a header tree nobody can reproduce. Three cache variables are set on
+# whatever was on the machine is a header tree nobody can reproduce. Eleven cache variables are set on
 # the configure line to get past probes that ask the compiler for things clang does not have, and
-# none of them can change the text that is installed, which is measured rather than assumed: seven of
-# the nine rows were installed a second time with the Debian cross gcc for that architecture and the
-# two trees are byte identical. The two rows that cannot be checked that way are i686, where Ubuntu's
-# own gcc enables CET by default and glibc refuses to configure for i386 with it on, and loongarch64,
-# which has no cross gcc in Ubuntu 24.04 at all.
+# none of them can change the text that is installed, which is measured rather than assumed: six of
+# the nine rows were installed a second time with the Debian cross gcc for that architecture, at every
+# release rather than at the pin, and the two trees are byte identical every time. The three rows that
+# cannot be checked that way are i686, where Ubuntu's own gcc enables CET by default and glibc refuses
+# to configure for i386 with it on, x32, which needs an -mx32 build of the x86_64 compiler that Ubuntu
+# does not ship, and loongarch64, which has no cross gcc in Ubuntu 24.04 at all.
+#
+# --release names which glibc row of sysroots/manifest to install, and without it the first row is
+# the one, which is the release everything else in this repository means when it says glibc. Every
+# row is there because bin/glibc-versions surveys them all, and a split tree of each is what
+# bin/glibc-merged merges into the one tree section 8.3 asks for: the release dimension on top of the
+# family dimension this script already has. The produced tree is named after the release, so eight of
+# them sit in the cache at once and none of them is the odd one out.
+#
+# The grid is ragged, and it is ragged in one place. glibc learned loongarch64 in 2.36, so the four
+# releases older than that have no sysdeps directory for it and configure would stop rather than
+# install an architecture it has never heard of. A row whose sysdeps directory the release does not
+# have is skipped and said out loud, which is a fact read out of the source rather than a table of
+# which release gained what.
 #
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced tree survives
 # a branch switch. Producing one that is already there is a no-op unless --force is given.
@@ -41,6 +56,7 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
 pins=$here/sysroots/manifest
 force=
+release=
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "glibc-headers: $*"; exit 1; }
@@ -53,11 +69,13 @@ sha256() {
 	fi
 }
 
-# Every glibc row of the target table, as the tuple, the ABI, the directory the headers go in, and
-# the kernel architecture glibc is configured against. The tuple is the key into `targets`, which is
-# where the zig spelling and the triple glibc's config.sub wants are already written down.
+# Every glibc row of the target table, as the tuple, the ABI, the directory the headers go in, the
+# kernel architecture glibc is configured against, and the sysdeps directory of glibc's own source
+# that has to exist for the release to know the architecture at all. The tuple is the key into
+# `targets`, which is where the zig spelling and the triple glibc's config.sub wants are already
+# written down.
 #
-# Four namings for nine rows, and they are all different. The ABI is the key for an install, because
+# Five namings for nine rows, and no two of them agree. The ABI is the key for an install, because
 # nine installs happen: x86_64, i386 and x32 are one architecture and three sets of types, and which
 # set a program gets is decided by the size of a pointer and a long rather than by the instruction
 # set. The directory is `header_family` in rucc-sysroot, which is coarser than the ABI and coarser
@@ -65,7 +83,10 @@ sha256() {
 # themselves, in `bits/wordsize.h`, so one x86 tree serves all three. That is glibc's claim rather
 # than ours, so the installs are held against each other below and a family whose ABIs disagree is a
 # failure with the differing files named. The kernel architecture is the fourth naming, and
-# bin/kernel-headers has that whole list with the reasons.
+# bin/kernel-headers has that whole list with the reasons. The sysdeps directory is the fifth, it is
+# per family rather than per ABI because a release either knows an architecture or does not, and it
+# is here so that asking whether glibc 2.28 can be installed for loongarch64 is looking in its source
+# rather than consulting a table of which release gained what.
 #
 # powerpc64le's directory is called powerpcle and a big endian powerpc row's would be called powerpc,
 # because powerpc is the one family whose two orders do not install the same text. Measured the same
@@ -74,15 +95,15 @@ sha256() {
 # differs, `bits/long-double.h`, because little endian powerpc can redirect `long double` to the
 # float128 ABI and big endian powerpc cannot. The width is in neither name, powerpc included, since
 # 32-bit against 64-bit powerpc with the order held fixed is an empty diff as well. tamnd/rucc#940.
-rows='x86_64-linux-gnu	x86_64	x86	x86
-i686-linux-gnu	i386	x86	x86
-x86_64-linux-gnux32	x32	x86	x86
-aarch64-linux-gnu	aarch64	aarch64	arm64
-armv7-linux-gnueabihf	arm	arm	arm
-riscv64-linux-gnu	riscv64	riscv	riscv
-loongarch64-linux-gnu	loongarch64	loongarch	loongarch
-powerpc64le-linux-gnu	powerpc64	powerpcle	powerpc
-s390x-linux-gnu	s390x	s390x	s390'
+rows='x86_64-linux-gnu	x86_64	x86	x86	x86
+i686-linux-gnu	i386	x86	x86	x86
+x86_64-linux-gnux32	x32	x86	x86	x86
+aarch64-linux-gnu	aarch64	aarch64	arm64	aarch64
+armv7-linux-gnueabihf	arm	arm	arm	arm
+riscv64-linux-gnu	riscv64	riscv	riscv	riscv
+loongarch64-linux-gnu	loongarch64	loongarch	loongarch	loongarch
+powerpc64le-linux-gnu	powerpc64	powerpcle	powerpc	powerpc
+s390x-linux-gnu	s390x	s390x	s390	s390'
 
 # The pinned zig, read out of toolchains/manifest, the same way bin/sysroot reads it.
 zig() {
@@ -103,14 +124,30 @@ target_column() {
 	printf '%s\n' "$spelling"
 }
 
-# Fetch and unpack the pinned glibc source once, shared by every architecture, and print where it
-# went. The same shape bin/sysroot uses for musl and bin/abilist uses for the same tarball: nothing
-# is fetched without a hash and nothing is fetched from a URL that is not in sysroots/manifest.
-glibc_source() {
-	line=$(awk -F'\t' '$1 == "glibc" { print; exit }' "$pins")
-	[ -n "$line" ] || die "sysroots/manifest has no glibc line"
+# The release this run is for, which is the one --release named or the first glibc row when it named
+# none. The first row is the release everything else in this repository means when it says glibc, and
+# it is first rather than newest because sysroots/manifest is an ordered list and the thing at the
+# top of it is the pin.
+wanted_release() {
+	if [ -n "$release" ]; then
+		awk -F'\t' -v v="$release" '$1 == "glibc" && $2 == v { found = 1 } END { exit !found }' "$pins" ||
+			die "sysroots/manifest has no glibc $release in it"
+		printf '%s\n' "$release"
+		return 0
+	fi
+	version=$(awk -F'\t' '$1 == "glibc" { print $2; exit }' "$pins")
+	[ -n "$version" ] || die "sysroots/manifest has no glibc line"
+	printf '%s\n' "$version"
+}
 
-	version=$(printf '%s' "$line" | cut -f2)
+# Fetch and unpack one glibc source once, shared by every architecture, and print where it went. The
+# same shape bin/sysroot uses for musl and bin/abilist uses for the same tarball: nothing is fetched
+# without a hash and nothing is fetched from a URL that is not in sysroots/manifest.
+glibc_source() {
+	version=$1
+	line=$(awk -F'\t' -v v="$version" '$1 == "glibc" && $2 == v { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no glibc $version line"
+
 	want=$(printf '%s' "$line" | cut -f4)
 	url=$(printf '%s' "$line" | cut -f5)
 	into=$cache/glibc-$version
@@ -188,8 +225,12 @@ host_tools() {
 # Done here, before anything is forked, rather than in each architecture's own job. Three of the nine
 # rows are x86, so three jobs running at once would assemble the same directory at the same time and
 # two of them would die on a file the third had just written.
+#
+# Over the rows this release has rather than over all nine, because a release with no loongarch
+# sysdeps directory is not going to be configured for it and a kernel tree nothing reads is a
+# directory somebody has to wonder about.
 kernel_trees() {
-	for tree_karch in $(printf '%s\n' "$rows" | cut -f4 | LC_ALL=C sort -u); do
+	for tree_karch in $(printf '%s\n' "$live" | cut -f4 | LC_ALL=C sort -u); do
 		mkdir -p "$1/kernel-$tree_karch"
 		cp -R "$cache/kernel-headers/generic/." "$1/kernel-$tree_karch/"
 		cp -R "$cache/kernel-headers/$tree_karch/." "$1/kernel-$tree_karch/"
@@ -242,16 +283,50 @@ install_one() {
 		# .gnu_attribute assembler directives recording the long double ABI of an object. clang does not
 		# write those directives at all.
 		#
-		# All three are compiler capability questions about building the library, and `make install-headers`
-		# compiles nothing. The seven row comparison against the Debian cross compilers is what makes that a
-		# measurement rather than a claim.
+		# libc_cv_compiler_ok is the release's own list of minimum compiler versions, and clang says
+		# __GNUC__ 4.2 whatever it is, so an older release reads that as a gcc from 2007 and stops. The
+		# newest releases ask the same question a way clang answers, which is why this one only shows up
+		# once there is a release older than the pin to install.
+		#
+		# libc_cv_gcc_builtin_redirection asks whether a builtin can be redirected with __asm, which clang
+		# does not support and which is a question about compiling the library rather than about
+		# installing a header.
+		#
+		# libc_cv_mlong_double_128ibm and libc_cv_compiler_powerpc64le_binary128_ok are powerpc64le's two,
+		# and every release older than the pin stops on one of them. The first asks whether the compiler's
+		# 128-bit long double is IBM's double double format, which is a question clang answers by having
+		# only ever had one long double for that machine. The second asks for the binary128 type glibc
+		# builds its float128 functions out of, which clang spells __ieee128 there rather than __float128.
+		#
+		# libc_cv_gcc_builtin_tbegin asks for __builtin_tbegin, which is how glibc writes the transactional
+		# memory lock elision path on s390x and which clang has never had. Every release older than the pin
+		# stops on it. libc_cv_compiler_ok_on_s390x is the same machine's summary of the four or five
+		# questions it just asked, and five of the eight releases stop on it after tbegin is answered.
+		#
+		# libc_cv_aarch64_sve_acle and libc_cv_aarch64_sve_asm are the SVE intrinsics the vector math
+		# library is written in and the SVE instructions its assembler has to accept. 2.39 and 2.41 stop on
+		# one or the other and 2.44 asks both a way clang and its assembler answer.
+		#
+		# All eleven are compiler capability questions about building the library, and `make install-headers`
+		# compiles nothing. The comparison against the Debian cross compilers is what makes that a
+		# measurement rather than a claim, and it is run over every release rather than over the pin alone
+		# for exactly this reason: six of these eleven are here because some release other than the pin asks
+		# something the pin does not.
 		cd "$one_work/build-$one_dir" || exit 1
 		"$one_source/configure" --prefix=/usr --host="$one_host" \
 			--with-headers="$one_work/kernel-$one_karch" --disable-werror \
 			CC="$one_work/cc-$one_dir" CXX= \
+			libc_cv_compiler_ok=yes \
+			libc_cv_gcc_builtin_redirection=yes \
 			libc_cv_cc_no_direct_extern_access=no \
 			libc_cv_mlong_double_128=yes \
 			libc_cv_no_gnu_attr_ok=yes \
+			libc_cv_mlong_double_128ibm=yes \
+			libc_cv_compiler_powerpc64le_binary128_ok=yes \
+			libc_cv_gcc_builtin_tbegin=yes \
+			libc_cv_compiler_ok_on_s390x=yes \
+			libc_cv_aarch64_sve_acle=yes \
+			libc_cv_aarch64_sve_asm=yes \
 			>"$one_work/$one_dir.configure.log" 2>&1 || exit 1
 		"$one_make" install-headers install_root="$one_work/install-$one_dir" \
 			install-bootstrap-headers=yes >"$one_work/$one_dir.make.log" 2>&1 || exit 1
@@ -259,10 +334,11 @@ install_one() {
 }
 
 produce() {
-	root=$cache/glibc-headers
+	version=$(wanted_release)
+	root=$cache/glibc-headers-$version
 
 	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
-		say "the glibc headers are already produced in $root"
+		say "the glibc $version headers are already produced in $root"
 		printf '%s\n' "$root/manifest"
 		return 0
 	fi
@@ -272,11 +348,22 @@ produce() {
 
 	make=$(glibc_make)
 	host_tools
-	source=$(glibc_source)
-	version=$(basename "$source" | sed 's/^glibc-//')
-	licence=$(awk -F'\t' '$1 == "glibc" { print $3; exit }' "$pins")
+	source=$(glibc_source "$version")
+	licence=$(awk -F'\t' -v v="$version" '$1 == "glibc" && $2 == v { print $3; exit }' "$pins")
 
-	work=$cache/glibc-headers.part
+	# The rows this release knows about. Read out of the unpacked source rather than out of a table,
+	# so that pinning a release older than an architecture is a line of output rather than a configure
+	# that stops three minutes in saying it has never heard of the machine.
+	live=$(printf '%s\n' "$rows" | while IFS='	' read -r tuple abi family karch sysdeps; do
+		if [ -d "$source/sysdeps/$sysdeps" ]; then
+			printf '%s\t%s\t%s\t%s\t%s\n' "$tuple" "$abi" "$family" "$karch" "$sysdeps"
+		else
+			say "glibc $version has no sysdeps/$sysdeps, so $abi is not one of its architectures"
+		fi
+	done)
+	[ -n "$live" ] || die "glibc $version has none of the nine architectures, which cannot be right"
+
+	work=$cache/glibc-headers-$version.part
 	rm -rf "$work"
 	mkdir -p "$work"
 	kernel_trees "$work"
@@ -284,8 +371,14 @@ produce() {
 	# Three at a time. configure is one process on one core for a minute and a half, and the install
 	# after it is copying, so three of them together finish in about the time two would take on their
 	# own and the machine stays usable.
+	#
+	# The rows arrive on standard input rather than down a pipe, because a pipe would put this loop in a
+	# subshell and the background jobs with it, and then the `wait` after the loop would have nothing of
+	# its own to wait for. With nine rows that was invisible, since the third `wait` inside the loop
+	# caught the last three. With eight of them, which is what a release older than loongarch64 has, the
+	# last two were still configuring when the status files below were read.
 	running=0
-	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi family karch; do
+	while IFS='	' read -r tuple abi family karch sysdeps; do
 		say "installing the $abi headers of glibc $version"
 		install_one "$tuple" "$abi" "$karch" "$work" "$source" "$make" &
 		running=$((running + 1))
@@ -293,11 +386,13 @@ produce() {
 			wait
 			running=0
 		fi
-	done
+	done <<EOF
+$live
+EOF
 	wait
 
-	abis=$(printf '%s\n' "$rows" | cut -f2 | tr '\n' ' ')
-	families=$(printf '%s\n' "$rows" | cut -f3 | LC_ALL=C sort -u | tr '\n' ' ')
+	abis=$(printf '%s\n' "$live" | cut -f2 | tr '\n' ' ')
+	families=$(printf '%s\n' "$live" | cut -f3 | LC_ALL=C sort -u | tr '\n' ' ')
 	for abi in $abis; do
 		[ "$(cat "$work/$abi.status" 2>/dev/null || true)" = ok ] || {
 			# Or true because a job that died before it ran configure has neither log, and a tail
@@ -317,7 +412,7 @@ produce() {
 	# warning.
 	for family in $families; do
 		lead=
-		for abi in $(printf '%s\n' "$rows" | awk -F'\t' -v f="$family" '$3 == f { print $2 }'); do
+		for abi in $(printf '%s\n' "$live" | awk -F'\t' -v f="$family" '$3 == f { print $2 }'); do
 			if [ -z "$lead" ]; then
 				lead=$abi
 				continue
@@ -374,7 +469,7 @@ produce() {
 	# split was derived from. Done before anything below touches the tree, so that what it compares is
 	# the rule's output and not ours, and done with diff -r rather than on the manifest so that a file
 	# in neither tree cannot pass.
-	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi family karch; do
+	printf '%s\n' "$live" | while IFS='	' read -r tuple abi family karch sysdeps; do
 		rm -rf "$work/reassembled-$abi"
 		mkdir -p "$work/reassembled-$abi"
 		cp -R "$work/tree/generic/." "$work/reassembled-$abi/"
@@ -446,15 +541,24 @@ check() {
 	return 1
 }
 
-case ${1:-} in
---check)
+if [ "${1:-}" = --check ]; then
 	[ $# -eq 3 ] || die "usage: bin/glibc-headers --check <manifest> <manifest>"
 	check "$2" "$3"
-	;;
---force)
-	force=yes
-	produce
-	;;
-"") produce ;;
-*) die "unknown argument $1" ;;
-esac
+	exit 0
+fi
+
+# --release and --force in either order, because a caller producing every release is going to want
+# both and having to remember which comes first is a trap with nothing on the other side of it.
+while [ $# -gt 0 ]; do
+	case $1 in
+	--force) force=yes ;;
+	--release)
+		[ $# -ge 2 ] || die "--release wants a version, as in --release 2.28"
+		release=$2
+		shift
+		;;
+	*) die "unknown argument $1" ;;
+	esac
+	shift
+done
+produce
