@@ -259,7 +259,9 @@ produce() {
 	# are copied flat into the staging prefix, the build writes its lib beside them, and only the lib
 	# is taken back out. Copying rather than symlinking because the build reads these thousands of
 	# times and a link that pointed into the cache would make the build depend on the cache staying
-	# still for the twenty minutes it runs.
+	# still for the two or three minutes it runs. Measured on four cores, that is 156 seconds for
+	# x86_64, 113 for i686 and 137 for aarch64, with the headers install in front of each of them
+	# another 25, 23 and 47.
 	work=$cache/sysroots/$target.runtime
 	rm -rf "$work" "$root.part"
 	mkdir -p "$work/build" "$work/install"
