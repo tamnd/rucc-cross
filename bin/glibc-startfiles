@@ -340,9 +340,10 @@ SH
 # is where glibc's gen-as-const-headers list names it. A build that asked nptl first stops on a header
 # that nothing has written yet.
 #
-# The three cache variables are bin/glibc-headers', with the same reasons, and they matter more here
-# than they do there: the first one selects a CFLAGS addition for building the library and this does
-# build part of it. Saying no is the answer every gcc gives. The other two say yes to an option zig
+# The three cache variables are three of the eleven bin/glibc-headers sets, with the same reasons,
+# and they matter more here than they do there: the first one selects a CFLAGS addition for building
+# the library and this does build part of it. Three rather than eleven because this builds the pinned
+# release and the other eight are there for the releases older than it. Saying no is the answer every gcc gives. The other two say yes to an option zig
 # cc does not take, and the wrapper drops both, which is written down above write_cc.
 #
 # sysincludes is overridden and that is not a detail. glibc asks the compiler where its own headers
@@ -775,8 +776,14 @@ produce() {
 
 	# Three at a time, the same as bin/glibc-headers, because configure is one process on one core
 	# for a minute and a half and the build after it is eight small files.
+	#
+	# The rows arrive on standard input rather than down a pipe, for the reason bin/glibc-headers gives
+	# where it does the same: a pipe puts the loop in a subshell and the background jobs with it, and
+	# then the `wait` after the loop has nothing of its own to wait for. Nine rows hides it, because the
+	# third `wait` inside the loop catches the last three, and a row count that is not a multiple of
+	# three would read the status files while the last jobs were still running.
 	running=0
-	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi karch rest; do
+	while IFS='	' read -r tuple abi karch rest; do
 		say "building the $abi start files of glibc $version"
 		build_one "$tuple" "$abi" "$karch" "$work" "$source" "$make" "$include" &
 		running=$((running + 1))
@@ -784,7 +791,9 @@ produce() {
 			wait
 			running=0
 		fi
-	done
+	done <<EOF
+$rows
+EOF
 	wait
 
 	abis=$(printf '%s\n' "$rows" | cut -f2 | tr '\n' ' ')

@@ -8,26 +8,28 @@
 #
 # Section 8.3 of the compiler's sysroot specification says one header tree per libc, with what
 # differs between releases written as a conditional inside a single file rather than as a tree per
-# release. Two thirds of that exist and neither third is here. bin/glibc-versions measured which
-# files a conditional would have to be written into at all, and `rucc-headers` in the compiler's
-# build-tools does the merging and checks its own output by reading every release back out of it.
-# What has been missing is the producer, which is the thing that puts the releases in front of the
-# tool and leaves a tree behind, and until there is one a target asking for 2.28 is handed one recent
-# release's text. That is the open half of tamnd/rucc#926.
+# release, and with the part that differs between machines split out into the directory the compiler
+# searches first. This is where the two halves meet. bin/glibc-headers installs one release for every
+# ABI and splits it into a generic tree and seven family trees, `rucc-headers` in the compiler's
+# build-tools merges trees over a release dimension and checks its own output by reading every
+# release back out of it, and this puts one in front of the other.
 #
-# The installs are bin/glibc-versions', and are not installed again here. That script already puts
-# one install per release in the cache for its survey, both want the same eight, and sixteen
-# configures for eight answers is not a trade anybody would make. So this reads what that one left
-# behind and says to run it when it is not there, which is the relationship bin/glibc-headers already
-# has with bin/kernel-headers.
+# The inputs are bin/glibc-headers' split trees, one per release, and they are not installed again
+# here. That script takes --release and leaves a named tree in the cache, so this reads what it left
+# and says to run it when it is not there, which is the relationship it already has with
+# bin/kernel-headers. Each tree's own manifest is left out of the merge, because a manifest is a
+# statement about a tree rather than a file in it and merging eight of them would put a ninth,
+# meaningless one in the output.
 #
-# One ABI, and it is x86_64, for the reason bin/glibc-versions gives at length: which of glibc's own
-# files change between releases is a fact about glibc's source rather than about a machine, and the
-# part that does differ between ABIs is what bin/glibc-headers already split into seven family trees.
-# Crossing the two, so that the tree is per family as well as per release, is the next piece of work
-# and not this one. Nor does this tree carry the patched features.h and the gnu/stubs.h prologue that
-# bin/glibc-headers writes, for the same reason: those belong to the split, and a tree that had them
-# without the split would be a third thing to keep in step with the other two.
+# So what comes out is the whole tree, and not a sample of it. Every ABI, the patched features.h and
+# the synthesized gnu/stubs.h included, because those are bin/glibc-headers' and this merges what
+# that leaves behind rather than reaching around it.
+#
+# The grid is ragged and the merge is what makes that harmless. glibc learned loongarch64 in 2.36, so
+# the loongarch directory is in four of the eight inputs, and a file that only some releases have is
+# written with a guard naming the ones that do. A target asking for a release older than the oldest
+# input gets the oldest input's text, which is what `rucc-headers` does by leaving the oldest branch
+# without a lower bound.
 #
 # The merge lives in the compiler's build-tools, so the compiler has to be checked out. $RUCC_SRC
 # names it and it defaults to beside this repository, which is where bin/compile-abi-corpus looks for
@@ -63,18 +65,22 @@ sha256() {
 }
 
 # Everything under a directory, hashed, as manifest lines, in the C locale. The same function
-# bin/glibc-headers has, minus the per file origin column it needs and this one does not: every file
-# in that tree is one release's text or a patch of it, and every file in this one is all eight
-# releases at once, so there is nothing a column could say per file that the header does not say
-# once.
+# bin/glibc-headers has, with the same two special cases: every file here is every release of one of
+# its files at once, so the origin column says what the file is rather than which release it came
+# from, and the two that are not glibc's own text are still the two that are not glibc's own text.
 manifest_lines() {
 	walk_root=$1
 	walk_licence=$2
 	(
 		cd "$walk_root" || exit 1
 		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			case $walk_file in
+			generic/features.h) walk_origin=glibc-merged-patched ;;
+			*/gnu/stubs.h) walk_origin=glibc-merged-stubs-prologue ;;
+			*) walk_origin=glibc-merged ;;
+			esac
 			printf '%s\t%s\t%s\t%s\n' \
-				"$walk_file" glibc-merged "$(sha256 "$walk_file")" "$walk_licence"
+				"$walk_file" "$walk_origin" "$(sha256 "$walk_file")" "$walk_licence"
 		done
 	)
 }
@@ -103,13 +109,12 @@ produce() {
 		die "sysroots/manifest has $count glibc release in it, and merging one release is copying it"
 	licence=$(awk -F'\t' '$1 == "glibc" { print $3; exit }' "$pins")
 
-	# The installs, which are the other script's and are checked for by name rather than assumed.
+	# The split trees, which are the other script's and are checked for by name rather than assumed.
 	# Every release or none: a merge over seven of the eight would succeed, produce a tree with
 	# different conditionals in it, and say nothing about the release it left out.
-	installs=$cache/glibc-versions
 	for version in $list; do
-		[ -f "$installs/install-$version/usr/include/features.h" ] ||
-			die "glibc $version is not installed in $installs, so run bin/glibc-versions first"
+		[ -f "$cache/glibc-headers-$version/manifest" ] ||
+			die "glibc $version is not split in $cache, so run bin/glibc-headers --release $version first"
 	done
 
 	[ -f "$src/build-tools/rucc-headers/Cargo.toml" ] ||
@@ -121,12 +126,62 @@ produce() {
 	rm -rf "$work"
 	mkdir -p "$work"
 
-	# One --release argument per install, oldest first, which is the order the tool wants. Built as a
-	# string and passed unquoted, because a list is what this shell has.
+	# One --release argument per input, oldest first, which is the order the tool wants. Built as a
+	# string and passed unquoted, because a list is what this shell has. The copy is what drops the
+	# manifest, and it is a copy rather than a link farm because the tool walks what it is given and a
+	# tree with one file missing is easier to make than an argument that says to skip one, and because
+	# the step after this one moves files about.
 	args=
 	for version in $list; do
-		args="$args --release $version=$installs/install-$version/usr/include"
+		mkdir -p "$work/in-$version"
+		cp -R "$cache/glibc-headers-$version/." "$work/in-$version/"
+		rm -f "$work/in-$version/manifest"
+		args="$args --release $version=$work/in-$version"
 	done
+
+	# A path that is generic in one release and per family in another has to be made per family in both,
+	# and it is the one way these eight trees could be merged into something that silently does not work.
+	# bin/glibc-headers derives its split by asking whether the ABIs of a release agree about a file, and
+	# eight releases do not have to give that the same answer. glibc unified bits/stat.h across
+	# architectures in 2.34, so it is per family in 2.28 and 2.31 and generic in the six releases after
+	# them, and bits/time64.h went the other way. Merged as they are, the tree would carry such a file in
+	# both places, each copy guarded to the releases that put it there, and rucc-sysroot searches the
+	# family directory before the generic one: asking for 2.34 would find the family copy and read a
+	# guard saying that release does not have the file.
+	#
+	# So the generic copy is pushed down into every family the release has, which is a move rather than a
+	# rewrite and leaves each release reassembling exactly as it did. Seventeen paths need it today, all
+	# of them files glibc moved into or out of sysdeps between 2.28 and 2.44.
+	paths_under() {
+		(cd "$1" && find . -type f | sed 's|^\./||')
+	}
+	for version in $list; do
+		paths_under "$work/in-$version/generic"
+	done | LC_ALL=C sort -u >"$work/generic-paths"
+	for version in $list; do
+		for dir in "$work/in-$version"/*/; do
+			[ "$(basename "$dir")" = generic ] && continue
+			paths_under "$dir"
+		done
+	done | LC_ALL=C sort -u >"$work/family-paths"
+	LC_ALL=C comm -12 "$work/generic-paths" "$work/family-paths" >"$work/both-paths"
+
+	moved=0
+	while read -r one; do
+		[ -n "$one" ] || continue
+		for version in $list; do
+			[ -f "$work/in-$version/generic/$one" ] || continue
+			for dir in "$work/in-$version"/*/; do
+				[ "$(basename "$dir")" = generic ] && continue
+				mkdir -p "$dir$(dirname "$one")"
+				cp "$work/in-$version/generic/$one" "$dir$one"
+			done
+			rm -f "$work/in-$version/generic/$one"
+			moved=$((moved + 1))
+		done
+	done <"$work/both-paths"
+	say "$(grep -c '' "$work/both-paths") paths are generic in one release and per family in another, \
+and $moved copies of them were pushed down into the families"
 
 	say "merging $count releases, $(printf '%s' "$list" | tr '\n' ' ')"
 	# shellcheck disable=SC2086
@@ -135,9 +190,13 @@ produce() {
 		$args --out "$work/tree" --listing "$work/listing") ||
 		die "the merge refused its own output, and what it said is above"
 
+	for version in $list; do
+		rm -rf "$work/in-$version"
+	done
+
 	# The record, which is this tree's rather than a sysroot's, for the reason bin/glibc-headers gives
-	# about the one it writes: a sysroot manifest names the target it was produced for and this tree
-	# is every glibc target's. The header carries every release the tree answers for, one line each,
+	# about the one it writes: a sysroot manifest names the target it was produced for and this tree is
+	# every glibc target's. The header carries every release the tree answers for, one line each,
 	# because that is the whole claim being made about these bytes.
 	{
 		printf 'rucc glibc merged headers manifest 1\n'

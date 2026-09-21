@@ -193,8 +193,7 @@ jobs:
       - name: produce the trees
         run: |
           ./bin/kernel-headers
-          ./bin/glibc-headers
-          cp "$HOME/.cache/rucc-cross/glibc-headers/manifest" manifest
+          cp "$(./bin/glibc-headers)" manifest
       - name: upload the record
         uses: actions/upload-artifact@v7.0.1
         with:
@@ -322,7 +321,8 @@ jobs:
           ./bin/glibc-distribution
 
   # What the releases in the support table differ by, held against the committed record. This is the
-  # measurement the multi-version tree was waiting on, and the job below is that tree, so the thing
+  # measurement the multi-version tree was waiting on and the job below is that tree, and the two are
+  # separate because this one is a number a reviewer reads and that one is an artifact. The thing
   # that can go wrong here is that somebody changes how a release is installed or adds a release to
   # sysroots/manifest and the record stops describing what comes out. Either is a real answer and
   # neither is noise, which is why this fails the run like the others.
@@ -344,23 +344,25 @@ jobs:
           ./bin/glibc-versions
 
   # The eight releases merged into the one tree section 8.3 of the sysroot specification asks for,
-  # produced on both host architectures, and the two records held against each other. The job above
-  # installs the releases and this one merges what it left behind, so eight installs answer both
-  # rather than sixteen answering one each.
+  # produced on both host architectures, and the two records held against each other. This is the
+  # whole tree rather than a sample of it: every release, split into the generic directory and the
+  # seven family directories the compiler searches, with the patched features.h and the synthesized
+  # gnu/stubs.h in it, because bin/glibc-headers --release leaves exactly that behind and this merges
+  # what it left.
   #
-  # Both architectures, and this is the one job in the file where the two hosts deliberately do the
-  # work with different compilers. The installs are the x86_64 ABI, an x86-64 runner has a gcc that
-  # targets it and an arm64 runner has none, so the arm64 side falls back to the pinned zig. If the
-  # merged tree is the same file either way then the text glibc installs does not depend on which of
-  # the two put it there, which bin/glibc-headers asserts about seven of its nine rows and nothing
-  # has ever asked about these eight releases.
+  # Which is why this job installs rather than reading someone else's installs. It is nine ABIs of
+  # eight releases, sixty eight of the seventy two, since glibc learned loongarch64 in 2.36 and the
+  # four releases older than that have no sysdeps directory for it. That is forty five minutes on an
+  # eight core machine running three installs at a time, and a four core runner will not beat it, so
+  # this is nightly for the reason the rest of this half of the file is.
+  #
+  # Both architectures, and what the second one is for is the bytes rather than the compiler. Every
+  # install is the pinned zig on either host, so an x86-64 runner and an arm64 runner doing the same
+  # work have to leave the same tree behind, and the two manifests are how that is asked.
   #
   # The compiler is checked out because the merge is a program in its build-tools, and it is a
   # program rather than a script because reading every release back out of a merged file to check
-  # that the merge was right is not shell work. The whole job measures two and a half minutes on
-  # either runner, which is the build and the merge on top of the eight installs and the kernel
-  # headers they need first, and that is why it is nightly like everything else in this half of the
-  # file.
+  # that the merge was right is not shell work.
   glibc-merged:
     name: the merged glibc tree on ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -386,9 +388,10 @@ jobs:
           RUCC_SRC: rucc
         run: |
           ./bin/kernel-headers
-          ./bin/glibc-versions
-          ./bin/glibc-merged
-          cp "$HOME/.cache/rucc-cross/glibc-merged/tree/manifest" manifest
+          for release in $(awk -F'\t' '$1 == "glibc" { print $2 }' sysroots/manifest); do
+            ./bin/glibc-headers --release "$release"
+          done
+          cp "$(./bin/glibc-merged)" manifest
       - name: upload the record
         uses: actions/upload-artifact@v7.0.1
         with:
