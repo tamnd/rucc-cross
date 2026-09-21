@@ -322,10 +322,10 @@ jobs:
           ./bin/glibc-distribution
 
   # What the releases in the support table differ by, held against the committed record. This is the
-  # measurement the multi-version tree is waiting on, so the thing that can go wrong with it is that
-  # somebody changes how a release is installed or adds a release to sysroots/manifest and the record
-  # stops describing what comes out. Either is a real answer and neither is noise, which is why this
-  # fails the run like the others.
+  # measurement the multi-version tree was waiting on, and the job below is that tree, so the thing
+  # that can go wrong here is that somebody changes how a release is installed or adds a release to
+  # sysroots/manifest and the record stops describing what comes out. Either is a real answer and
+  # neither is noise, which is why this fails the run like the others.
   #
   # One architecture, unlike the job above, because the survey installs one ABI and it would be the
   # same record from either runner. The eight installs are about two minutes between them.
@@ -342,6 +342,71 @@ jobs:
         run: |
           ./bin/kernel-headers
           ./bin/glibc-versions
+
+  # The eight releases merged into the one tree section 8.3 of the sysroot specification asks for,
+  # produced on both host architectures, and the two records held against each other. The job above
+  # installs the releases and this one merges what it left behind, so eight installs answer both
+  # rather than sixteen answering one each.
+  #
+  # Both architectures, and this is the one job in the file where the two hosts deliberately do the
+  # work with different compilers. The installs are the x86_64 ABI, an x86-64 runner has a gcc that
+  # targets it and an arm64 runner has none, so the arm64 side falls back to the pinned zig. If the
+  # merged tree is the same file either way then the text glibc installs does not depend on which of
+  # the two put it there, which bin/glibc-headers asserts about seven of its nine rows and nothing
+  # has ever asked about these eight releases.
+  #
+  # The compiler is checked out because the merge is a program in its build-tools, and it is a
+  # program rather than a script because reading every release back out of a merged file to check
+  # that the merge was right is not shell work. The whole job measures two and a half minutes on
+  # either runner, which is the build and the merge on top of the eight installs and the kernel
+  # headers they need first, and that is why it is nightly like everything else in this half of the
+  # file.
+  glibc-merged:
+    name: the merged glibc tree on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
+      - name: install zig
+        run: ./toolchains/install zig
+      - name: produce the tree
+        env:
+          RUCC_SRC: rucc
+        run: |
+          ./bin/kernel-headers
+          ./bin/glibc-versions
+          ./bin/glibc-merged
+          cp "$HOME/.cache/rucc-cross/glibc-merged/tree/manifest" manifest
+      - name: upload the record
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: glibc-merged-${{ runner.arch }}
+          path: manifest
+
+  glibc-merged-reproducible:
+    name: the same merged glibc tree on two hosts
+    needs: glibc-merged
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: download both records
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: records
+      - name: they have to be the same file
+        run: ./bin/glibc-merged --check records/glibc-merged-X64/manifest records/glibc-merged-ARM64/manifest
 
   # The three windows-gnu sysroots, produced from source and held against the hashes the compiler's
   # release pins for them. Every other reproducibility job here compares two fresh runs against each
@@ -457,6 +522,8 @@ jobs:
       - glibc-startfiles-reproducible
       - glibc-distribution
       - glibc-versions
+      - glibc-merged
+      - glibc-merged-reproducible
       - mingw-sysroots
     runs-on: ubuntu-24.04
     steps:
@@ -471,7 +538,9 @@ jobs:
       # comparison against the distribution: a header that is not the distribution's text is either a
       # patch nobody has written down yet or a recipe that stopped producing what it claims to. The
       # survey of what the releases differ by counts the same way, because a record that has stopped
-      # describing what comes out is a record nobody should be reading. The windows-gnu sysroots are
+      # describing what comes out is a record nobody should be reading, and the tree merged out of those
+      # releases counts twice, once for the merge refusing its own output and once for the two hosts
+      # disagreeing about the bytes. The windows-gnu sysroots are
       # the strongest of the lot: a produced archive that no longer hashes to what the compiler pins
       # means either the recipe moved or the published file is not what the recipe makes, and both of
       # those are somebody here finding out before a user does.
@@ -486,6 +555,8 @@ jobs:
           || needs.glibc-startfiles-reproducible.result != 'success'
           || needs.glibc-distribution.result != 'success'
           || needs.glibc-versions.result != 'success'
+          || needs.glibc-merged.result != 'success'
+          || needs.glibc-merged-reproducible.result != 'success'
           || needs.mingw-sysroots.result != 'success'
         run: exit 1
       - name: pass
