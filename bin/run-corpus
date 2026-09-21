@@ -139,6 +139,20 @@ for tuple in $tuples; do
 		fi
 	fi
 
+	# One more when the reference is the compiler, and it is the mirror of the two above. The targets
+	# table names a zig spelling for every row and a gcc for thirteen of them, so a run with
+	# RUCC_CROSS_REFERENCE=gcc has rows there is no reference for at all. Saying so here rather than
+	# letting bin/reference-cc refuse keeps a row nobody could have compiled from reading as a row
+	# that failed to compile, which is what the nightly second opinion job printed for eighteen of
+	# them every night.
+	if [ -z "$reason" ] && [ "$cc" = reference ]; then
+		column=2
+		[ "${RUCC_CROSS_REFERENCE:-zig}" = zig ] || column=3
+		spelling=$(awk -F'\t' -v t="$tuple" -v c="$column" '$1 == t { print $c }' "$here/targets")
+		[ "$spelling" != "-" ] ||
+			reason="${RUCC_CROSS_REFERENCE:-zig} has no spelling for $tuple, and the targets table says so"
+	fi
+
 	if [ -n "$reason" ]; then
 		printf '%-24s skipped, %s\n' "$tuple" "$reason"
 		skipped=$((skipped + 1))

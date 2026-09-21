@@ -115,7 +115,23 @@ install_packaged() {
 		apt="$apt gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross"
 		apt="$apt gcc-s390x-linux-gnu libc6-dev-s390x-cross"
 		apt="$apt gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"
-		apt="$apt gcc-mingw-w64-x86-64"
+		apt="$apt gcc-mingw-w64-x86-64 gcc-mingw-w64-i686"
+		brew=""
+		;;
+	# The rows of the targets table that have a reference gcc and are neither a glibc ABI nor an x86
+	# one. Separate from gcc-cross because nothing that produces a sysroot wants them: they exist so
+	# that bin/compile-corpus has a second opinion for every row the table says has one, and a row
+	# with no compiler installed for it is a row nobody is checking. arm-none-eabi answers for both
+	# bare metal arm rows, and loongarch64 is the port with no unversioned metapackage yet, so the
+	# package is named for a compiler version and bin/reference-cc finds the command it installs.
+	#
+	# x86_64 only for the same reason as the bucket below, which is that Ubuntu builds these two for
+	# an amd64 host.
+	gcc-cross-corpus)
+		[ "$(uname -m)" = x86_64 ] ||
+			die "gcc-cross-corpus is packaged for an x86_64 host only, and this is a $(uname -m)"
+		apt="gcc-arm-none-eabi"
+		apt="$apt gcc-14-loongarch64-linux-gnu"
 		brew=""
 		;;
 	# The other two ABIs of an x86 machine. Separate from gcc-cross because these two are the only
@@ -152,7 +168,7 @@ install_packaged() {
 for tool in "$@"; do
 	case $tool in
 	zig) install_pinned zig ;;
-	qemu | gcc-cross | gcc-cross-x86) install_packaged "$tool" ;;
+	qemu | gcc-cross | gcc-cross-x86 | gcc-cross-corpus) install_packaged "$tool" ;;
 	*) die "unknown tool $tool, and toolchains/manifest lists what there is" ;;
 	esac
 done

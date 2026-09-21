@@ -68,6 +68,12 @@ jobs:
   # The same corpus against the platform's cross gcc rather than against zig, for the rows where a
   # gcc exists. When the two references disagree, that is the interesting day, and the whole reason
   # for having two.
+  #
+  # Three installs rather than one, because the targets table names a gcc for thirteen rows and
+  # gcc-cross holds seven of them. Without the other two buckets the job printed twelve `is not on
+  # the path` failures a night for six targets nobody was checking, which is the shape of noise that
+  # hides the one real disagreement this job exists to find. x86-64 only, which is why the two extra
+  # buckets can be the ones Ubuntu packages for an amd64 host.
   second-opinion:
     name: the corpus against cross gcc
     runs-on: ubuntu-24.04
@@ -82,6 +88,8 @@ jobs:
       - name: install the cross compilers and qemu
         run: |
           ./toolchains/install gcc-cross
+          ./toolchains/install gcc-cross-x86
+          ./toolchains/install gcc-cross-corpus
           ./toolchains/install qemu
       - name: record which gcc this was
         run: aarch64-linux-gnu-gcc --version | head -1
