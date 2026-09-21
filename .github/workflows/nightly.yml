@@ -164,6 +164,9 @@ jobs:
   #
   # The glibc install is also the only thing here that wants gawk. The runner images have it, and the
   # script says so plainly if a machine does not.
+  #
+  # The compiler for the configure runs is the pinned zig, the same one bin/sysroot uses, so it has to
+  # be installed first. It is not the distribution's cross gcc and this job does not want one.
   glibc-headers:
     name: glibc's headers on ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -177,6 +180,8 @@ jobs:
             os: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: install zig
+        run: ./toolchains/install zig
       - name: produce the trees
         run: |
           ./bin/kernel-headers
