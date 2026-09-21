@@ -99,18 +99,34 @@ install_packaged() {
 	tool=$1
 	case $tool in
 	qemu) apt="qemu-user qemu-user-static" ; brew="qemu" ;;
+	# One compiler and one libc6-dev-*-cross per ABI. The dev package is named here rather than left
+	# to apt to work out, because it is a Recommends of the compiler and not a Depends, and the
+	# install below passes --no-install-recommends. What arrives without it is a compiler that cannot
+	# link: libc6-*-cross is a Depends and carries libc.so.6, the linker is asking for libc.so, and
+	# `cannot find -lc` is what comes back. It is also the distribution's own header tree for the ABI,
+	# which is the thing bin/glibc-distribution holds our headers against. The mingw row needs no
+	# partner, because mingw-w64-x86-64-dev is a Depends of that compiler rather than a Recommends.
+	#
+	# One assignment per row rather than one long line, so that a row and its dev package sit next to
+	# each other and adding an ABI is adding a line.
 	gcc-cross)
-		apt="gcc-aarch64-linux-gnu gcc-riscv64-linux-gnu gcc-powerpc64le-linux-gnu gcc-s390x-linux-gnu gcc-arm-linux-gnueabihf gcc-mingw-w64-x86-64"
+		apt="gcc-aarch64-linux-gnu libc6-dev-arm64-cross"
+		apt="$apt gcc-riscv64-linux-gnu libc6-dev-riscv64-cross"
+		apt="$apt gcc-powerpc64le-linux-gnu libc6-dev-ppc64el-cross"
+		apt="$apt gcc-s390x-linux-gnu libc6-dev-s390x-cross"
+		apt="$apt gcc-arm-linux-gnueabihf libc6-dev-armhf-cross"
+		apt="$apt gcc-mingw-w64-x86-64"
 		brew=""
 		;;
 	# The other two ABIs of an x86 machine. Separate from gcc-cross because these two are the only
 	# rows of the table whose cross packages Ubuntu builds for an amd64 host only, and because the
-	# thing wanted from them is not the compiler: each one pulls in a libc6-dev-*-cross, which is the
+	# thing wanted from them is not the compiler: it is the libc6-dev-*-cross beside it, which is the
 	# distribution's own header tree for that ABI, and bin/glibc-distribution compares against it.
 	gcc-cross-x86)
 		[ "$(uname -m)" = x86_64 ] ||
 			die "gcc-cross-x86 is packaged for an x86_64 host only, and this is a $(uname -m)"
-		apt="gcc-i686-linux-gnu gcc-x86-64-linux-gnux32"
+		apt="gcc-i686-linux-gnu libc6-dev-i386-cross"
+		apt="$apt gcc-x86-64-linux-gnux32 libc6-dev-x32-cross"
 		brew=""
 		;;
 	*) die "unknown tool $tool" ;;
