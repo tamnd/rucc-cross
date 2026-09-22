@@ -1,0 +1,7 @@
+memcpy 0123456789
+strcpy copied
+strncpy truncated to fi
+snprintf 5 42-ok
+memmove 1
+write ok
+bounded 63

@@ -1,0 +1,38 @@
+# A distribution image per glibc release, for the execution half of section 8.4's validation.
+#
+# Two columns, tab separated: the glibc release as sysroots/manifest spells it, and the container
+# image whose libc is that release. Lines starting with a hash are comments and blank lines are
+# ignored. bin/glibc-image-check reads this, builds the corpus against our own merged header tree at
+# that release, and runs the binaries inside the image.
+#
+# Why an image rather than a machine. Section 8.4 asks for a real distribution of the release, and
+# what makes it real is that the libc is the one that distribution shipped rather than one we built.
+# A container gives that, on any host, for every release at once, which is the only way to ask the
+# question eight times a night. What it does not give is real hardware, and that distinction is
+# section 14.5's rather than this file's: every row here runs on the host architecture natively and
+# on the other one through binfmt, and neither of those is a machine.
+#
+# The image is a tag rather than a digest, deliberately. A digest would pin the exact bytes and
+# would also freeze the security updates out, and the thing being tested is the libc people are
+# running rather than the libc they were running when this file was written. A tag can drift, so
+# bin/glibc-image-check asks each image what its glibc version is and fails if the answer is not the
+# release in the first column. That is the check that catches a distribution moving on, and it is
+# better than a digest because it fails with the reason rather than with a hash mismatch.
+#
+# The choices, which follow the same list of distributions sysroots/manifest gives its reasons for.
+# 2.34 is the one that is not Debian or Ubuntu, because no Debian or Ubuntu release shipped it: it
+# is RHEL 9's, and almalinux is the rebuild of RHEL that publishes an image anybody can pull.
+#
+# glibc 2.44 has no row, and that is not an oversight. It is the pinned release and it is current,
+# and the newest thing any distribution ships today is 2.43, in Ubuntu 26.04 and in Debian sid. A
+# binary built for 2.44 names version nodes 2.43 does not have, so running it on 2.43 would fail for
+# a reason that has nothing to do with the header tree. The row goes in when a distribution ships
+# it, and until then the pin is the one release this check cannot make.
+
+2.28	debian:10-slim
+2.31	ubuntu:20.04
+2.34	almalinux:9-minimal
+2.35	ubuntu:22.04
+2.36	debian:12-slim
+2.39	ubuntu:24.04
+2.41	ubuntu:25.04
