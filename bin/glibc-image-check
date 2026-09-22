@@ -33,6 +33,12 @@
 # an image for every release in the table, and the one this host cannot run natively runs through
 # binfmt, which is emulation and is named as such here for the reason section 14.5 gives.
 #
+# Rung 0 and rung 1 of spec/14-target-ladder.md, because section 8.4 asks for both. Rung 0 is the
+# corpus, which is ours and is small on purpose, and rung 1 is sqlite, which is a quarter of a
+# million lines of somebody else's C written against no compiler in particular and reaching into
+# most of the library. The small programs say which seam moved and the large one says whether a real
+# program comes out of this tree working, and neither answers for the other.
+#
 # Three ways per program, because the header decides different things under different feature test
 # macros and the release is not the only axis. Plain is what a program gets with nothing defined,
 # _FILE_OFFSET_BITS 64 moves every large file call to its 64-bit spelling, and -O2 with
@@ -48,12 +54,21 @@ set -eu
 here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
 pins=$here/sysroots/manifest
+sources=$here/corpus/manifest
 table=$here/sysroots/images
 release=
 arch=
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "glibc-image-check: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
 
 # The architectures, as the ABI, the family directory of the merged tree, the kernel architecture,
 # the target triple to compile for and the container platform to run on. The first four are the same
@@ -110,6 +125,39 @@ programs() {
 	done
 }
 
+# Fetch and unpack one row of corpus/manifest once and print where it went. The same shape
+# bin/glibc-headers uses for a glibc source, for the same two reasons: nothing is fetched without a
+# hash, and nothing is fetched from a URL that is not written down in this repository.
+corpus_source() {
+	line=$(awk -F'\t' -v n="$1" '/^#/ { next } $1 == n { print; exit }' "$sources")
+	[ -n "$line" ] || die "corpus/manifest has no $1 line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/$1-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and corpus/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xf "$archive" -C "$into.part" --strip-components=1
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
 # The kernel headers for one architecture, assembled the way bin/glibc-headers assembles them: the
 # generic tree and then the per architecture one on top, because that is the order the compiler
 # would search them in if they were two directories.
@@ -137,6 +185,38 @@ compile() {
 		$3 "$1" -o "$2" -lm -lpthread >"$2.compile.log" 2>&1
 }
 
+# The sqlite shell, which is the same two files its own configure builds, against the same tree as
+# everything else and with no define of ours. The amalgamation decides what it needs by asking the
+# headers, which is the point: a tree that answers one of those questions differently from a real
+# install produces a different library rather than a diagnostic, and the script it then runs is what
+# says which happened.
+compile_sqlite() {
+	"$zig" cc -target "$target.$minor_release" -nostdlibinc \
+		-isystem "$tree/$family" -isystem "$tree/generic" -isystem "$kernel" \
+		-D__GLIBC_MINOR__="$minor" -Wno-unused-command-line-argument \
+		-O2 -I"$1" "$1/sqlite3.c" "$1/shell.c" -o "$2" \
+		-lm -lpthread -ldl >"$2.compile.log" 2>&1
+}
+
+# One binary's exit status and output, held against the file beside its source. A non zero status is
+# reported with the first few lines of standard error, because when this fails it is usually the
+# loader saying which symbol is missing and that sentence is the whole answer. Adds to `bad`, which
+# the caller started empty and reads afterwards.
+check_one() {
+	status=$(cat "$dir/out/$1.status" 2>/dev/null || true)
+	if [ "$status" != 0 ]; then
+		bad="$bad $1"
+		say "$1 exited ${status:-with nothing} on $image as $abi:"
+		head -5 "$dir/out/$1.err" >&2 2>/dev/null || true
+		return 0
+	fi
+	cmp -s "$2" "$dir/out/$1.out" || {
+		bad="$bad $1"
+		say "$1 printed something else on $image as $abi:"
+		diff -u "$2" "$dir/out/$1.out" >&2 || true
+	}
+}
+
 run_one() {
 	image=$1
 	platform=$2
@@ -150,7 +230,13 @@ run_one() {
 ldd --version 2>/dev/null | head -1 | awk '{ print $NF }' >out/version
 for one in bin/*; do
 	name=${one#bin/}
-	"./$one" >"out/$name.out" 2>"out/$name.err"
+	# A program with a file of the same name under in/ is fed it, which is how the sqlite shell is
+	# given its script. Everything else reads nothing and is given nothing.
+	if [ -f "in/$name" ]; then
+		"./$one" <"in/$name" >"out/$name.out" 2>"out/$name.err"
+	else
+		"./$one" >"out/$name.out" 2>"out/$name.err"
+	fi
 	printf '%s\n' "$?" >"out/$name.status"
 done
 RUNNER
@@ -171,6 +257,7 @@ produce() {
 
 	list=$(wanted)
 	unchecked
+	sqlite=$(corpus_source sqlite)
 
 	work=$cache/glibc-image-check
 	rm -rf "$work"
@@ -209,6 +296,26 @@ $ways
 WAYS
 			done
 
+			# Rung 1, which is the sqlite shell built out of the amalgamation against the same tree.
+			# The programs above are ours and are small on purpose, and the thing they cannot say is
+			# whether a quarter of a million lines of somebody else's C, written against no compiler
+			# in particular and reaching into most of the library, comes out of this tree working.
+			# Section 8.4 asks for rung 0 and rung 1 for that reason.
+			#
+			# Built once per pair rather than three ways, because the ways are about what the header
+			# does under a feature test macro and the amalgamation sets its own, and because this one
+			# translation unit is longer than everything above it put together. -O2 is how people
+			# build it. Loading an extension is left in and -ldl with it, which is a seam of its own:
+			# libdl was a library of its own until glibc 2.34 merged it into libc, so this is fourteen
+			# link lines across that boundary.
+			say "building sqlite $(basename "$sqlite" | cut -d- -f2) for $abi at glibc $minor_release"
+			compile_sqlite "$sqlite" "$dir/bin/sqlite" ||
+				die "sqlite did not build for $abi at glibc $minor_release, \
+and the log is in $dir/bin/sqlite.compile.log"
+			built=$((built + 1))
+			mkdir -p "$dir/in"
+			cp "$here/corpus/sqlite/script.sql" "$dir/in/sqlite"
+
 			run_one "$image" "$platform" "$dir"
 
 			# The image's own answer about which glibc it is, asked before anything it produced is
@@ -221,25 +328,14 @@ WAYS
 			bad=
 			for source in $(programs); do
 				name=$(basename "$source" .c)
-				expected=${source%.c}.expected
 				while IFS='	' read -r way flags; do
 					[ -n "$way" ] || continue
-					status=$(cat "$dir/out/$name.$way.status" 2>/dev/null || true)
-					if [ "$status" != 0 ]; then
-						bad="$bad $name.$way"
-						say "$name.$way exited ${status:-with nothing} on $image as $abi:"
-						head -5 "$dir/out/$name.$way.err" >&2 2>/dev/null || true
-						continue
-					fi
-					cmp -s "$expected" "$dir/out/$name.$way.out" || {
-						bad="$bad $name.$way"
-						say "$name.$way printed something else on $image as $abi:"
-						diff -u "$expected" "$dir/out/$name.$way.out" >&2 || true
-					}
+					check_one "$name.$way" "${source%.c}.expected"
 				done <<WAYS
 $ways
 WAYS
 			done
+			check_one sqlite "$here/corpus/sqlite/script.expected"
 
 			rows=$((rows + 1))
 			if [ -n "$bad" ]; then

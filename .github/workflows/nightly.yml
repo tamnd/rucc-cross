@@ -428,12 +428,14 @@ jobs:
   # Seven releases, because 2.44 is the pin and the newest libc any distribution ships today is 2.43,
   # and both architectures, because the tree's split is per machine and a check that only ever reads
   # one family directory says nothing about the other six. That is fourteen pairs of ten programs in
-  # three ways, and the aarch64 half of it is binfmt rather than a machine, which is the distinction
-  # section 14.5 makes and not this job's to blur.
+  # three ways plus the sqlite shell, which is rung 0 and rung 1 of the target ladder and is what
+  # section 8.4 asks for. The aarch64 half of it is binfmt rather than a machine, which is the
+  # distinction section 14.5 makes and not this job's to blur.
   #
   # The tree is produced here rather than taken off the job above, the same way six jobs in this file
   # run bin/kernel-headers for themselves rather than sharing one install. That is most of an hour
-  # before this job starts doing its own work, and a nightly is where an hour goes.
+  # before this job starts doing its own work, and the work itself is about fifty minutes on an eight
+  # core machine, so this is the longest job in the file by some way. A nightly is where that goes.
   glibc-image-check:
     name: the merged glibc tree on real distributions
     runs-on: ubuntu-24.04

@@ -1,0 +1,14 @@
+# The real programs the ladder is climbed on, pinned the way sysroots/manifest pins a libc.
+#
+# Five columns, tab separated: the name, the version, the licence, the sha256 of the archive, and
+# the URL. Lines starting with a hash are comments. This is a separate file from sysroots/manifest
+# because these are not sysroots: nothing here ends up in a tree a compiler searches, and what they
+# are for is being built against one. The columns are the same five so that the fetch is the same
+# fetch, which is that nothing is downloaded without a hash and nothing is downloaded from a URL
+# that is not written down here.
+#
+# sqlite is rung 1 of spec/14-target-ladder.md in tamnd/rucc, and the version is the one that
+# repository's own library check pins, so the two are asking about the same quarter of a million
+# lines of somebody else's C rather than about two different ones.
+
+sqlite	3.53.4	public-domain	0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c	https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
