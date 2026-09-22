@@ -411,6 +411,59 @@ jobs:
       - name: they have to be the same file
         run: ./bin/glibc-merged --check records/glibc-merged-X64/manifest records/glibc-merged-ARM64/manifest
 
+  # The merged tree built against, and then run on, the libc each release actually shipped in. This is
+  # the third of the three checks section 8.4 of the sysroot specification asks for, and the only one
+  # of them that can find the thing section 8.3 is most afraid of. The two checks above it hold our
+  # header text against somebody else's header text, and a header that describes a structure the
+  # library stopped using is correct text in both trees. What is wrong is the pair of the header and
+  # the machine, and the only way to ask about a pair is to run it.
+  #
+  # stat is the example the specification names. Until 2.33 the header turned the call into __xstat
+  # with a leading version argument and from 2.33 there is a real stat symbol, so a binary built with
+  # the newer spelling and run on 2.28 names something that release does not export and the loader
+  # refuses to start it. That is not a hypothetical: the same program compiled for 2.39 and run on
+  # debian:10 fails with GLIBC_2.33 not found, and compiled for 2.28 out of the same merged tree it
+  # runs.
+  #
+  # Seven releases, because 2.44 is the pin and the newest libc any distribution ships today is 2.43,
+  # and both architectures, because the tree's split is per machine and a check that only ever reads
+  # one family directory says nothing about the other six. That is fourteen pairs of ten programs in
+  # three ways, and the aarch64 half of it is binfmt rather than a machine, which is the distinction
+  # section 14.5 makes and not this job's to blur.
+  #
+  # The tree is produced here rather than taken off the job above, the same way six jobs in this file
+  # run bin/kernel-headers for themselves rather than sharing one install. That is most of an hour
+  # before this job starts doing its own work, and a nightly is where an hour goes.
+  glibc-image-check:
+    name: the merged glibc tree on real distributions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
+      - name: install zig
+        run: ./toolchains/install zig
+      # binfmt, so that the aarch64 half of the grid has something to run on. A tag rather than a
+      # digest for the reason sysroots/images gives about its own images, and tonistiigi/binfmt
+      # directly rather than the action that wraps it, because the action is one docker run and this
+      # file has nothing but actions/* in it.
+      - name: let this host run the other architecture
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+      - name: produce the tree
+        env:
+          RUCC_SRC: rucc
+        run: |
+          ./bin/kernel-headers
+          for release in $(awk -F'\t' '$1 == "glibc" { print $2 }' sysroots/manifest); do
+            ./bin/glibc-headers --release "$release"
+          done
+          ./bin/glibc-merged >/dev/null
+      - name: build the corpus against ours and run it on theirs
+        run: ./bin/glibc-image-check
+
   # The three windows-gnu sysroots, produced from source and held against the hashes the compiler's
   # release pins for them. Every other reproducibility job here compares two fresh runs against each
   # other, and this one compares a fresh run against a fixed published number, which is the stronger
@@ -527,6 +580,7 @@ jobs:
       - glibc-versions
       - glibc-merged
       - glibc-merged-reproducible
+      - glibc-image-check
       - mingw-sysroots
     runs-on: ubuntu-24.04
     steps:
@@ -543,7 +597,9 @@ jobs:
       # survey of what the releases differ by counts the same way, because a record that has stopped
       # describing what comes out is a record nobody should be reading, and the tree merged out of those
       # releases counts twice, once for the merge refusing its own output and once for the two hosts
-      # disagreeing about the bytes. The windows-gnu sysroots are
+      # disagreeing about the bytes. Running that tree on the distributions counts hardest of the
+      # header jobs, because it is the only one whose failure is a binary that does not start on
+      # somebody's machine rather than two files that differ. The windows-gnu sysroots are
       # the strongest of the lot: a produced archive that no longer hashes to what the compiler pins
       # means either the recipe moved or the published file is not what the recipe makes, and both of
       # those are somebody here finding out before a user does.
@@ -560,6 +616,7 @@ jobs:
           || needs.glibc-versions.result != 'success'
           || needs.glibc-merged.result != 'success'
           || needs.glibc-merged-reproducible.result != 'success'
+          || needs.glibc-image-check.result != 'success'
           || needs.mingw-sysroots.result != 'success'
         run: exit 1
       - name: pass

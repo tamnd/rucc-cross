@@ -1,0 +1,281 @@
+#!/bin/sh
+# Build the corpus against our own merged glibc header tree and run it on the distribution that
+# ships that release, which is the execution check of section 8.4 of the sysroot specification.
+#
+# usage: bin/glibc-image-check
+#        bin/glibc-image-check --release <version>
+#        bin/glibc-image-check --arch <abi>
+#
+# Section 8.4 has three checks and the first two are already here. Structural equivalence asks
+# whether our headers describe the same types as a real install, macro equivalence asks whether they
+# define the same constants, and both of them compare our text against somebody else's text. This
+# one compares our text against a running library, which is the only one of the three that can find
+# the class of problem section 8.3 is most afraid of: a header that describes a structure the
+# library does not use any more, or that calls a symbol the library does not export yet. Neither of
+# those is visible in a diff of two header trees, because in both trees the header is internally
+# consistent. What is not consistent is the pair of the header and the machine it runs against.
+#
+# stat is the example the specification names and it is worth spelling out. Until glibc 2.33 the
+# header turned a call to stat into a call to __xstat with a leading version argument, and from 2.33
+# on there is a real stat symbol. A merged tree that handed a 2.28 target the 2.39 spelling would
+# produce a binary naming a symbol 2.28 does not export, which the loader refuses. Nothing before
+# this step would have noticed, because both spellings are correct headers.
+#
+# So the shape is: our tree, their library. The programs are compiled on this machine against the
+# merged tree and nothing else, with the release the target asked for supplied to the compiler the
+# way rucc supplies it, and then they are run inside the distribution's own image with nothing of
+# ours in it but the binaries. A distribution image per release is in sysroots/images with the
+# reasons, and what each image is asked first is its own glibc version, because a tag that has moved
+# to a newer release is a row that would otherwise pass for the wrong reason.
+#
+# Both architectures, because the tree's family split is per machine and a check that only ever
+# reads one family directory says nothing about the other six. x86_64 and aarch64 are the two with
+# an image for every release in the table, and the one this host cannot run natively runs through
+# binfmt, which is emulation and is named as such here for the reason section 14.5 gives.
+#
+# Three ways per program, because the header decides different things under different feature test
+# macros and the release is not the only axis. Plain is what a program gets with nothing defined,
+# _FILE_OFFSET_BITS 64 moves every large file call to its 64-bit spelling, and -O2 with
+# _FORTIFY_SOURCE 2 rewrites the string and stdio calls into the checked symbols, which is where a
+# release that does not export one of them fails to load.
+#
+# The merged tree is bin/glibc-merged's and is not produced here, the same relationship that script
+# has with bin/glibc-headers. Producing it is most of an hour and this is a few minutes, so the two
+# belong in separate runs and in separate jobs.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+table=$here/sysroots/images
+release=
+arch=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-image-check: $*"; exit 1; }
+
+# The architectures, as the ABI, the family directory of the merged tree, the kernel architecture,
+# the target triple to compile for and the container platform to run on. The first four are the same
+# namings bin/glibc-headers writes down with its reasons, and the fifth is the container world's own
+# spelling of an architecture, which agrees with none of them.
+arches='x86_64	x86	x86	x86_64-linux-gnu	linux/amd64
+aarch64	aarch64	arm64	aarch64-linux-gnu	linux/arm64'
+
+# The ways each program is compiled, as a name and the flags. The name is what a failure is reported
+# as, so it is a word rather than a flag list.
+ways='plain
+largefile	-D_FILE_OFFSET_BITS=64
+fortified	-O2 -D_FORTIFY_SOURCE=2'
+
+# The pinned zig, read out of toolchains/manifest, the same way bin/glibc-headers reads it.
+zig() {
+	version=$(awk -F'\t' '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	[ -n "$version" ] || die "toolchains/manifest has no zig line"
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "the pinned zig is not in $cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+# Every release in the image table, or the one --release named. The table is the list rather than
+# sysroots/manifest, because a release with no image is a release this check cannot make and the
+# table is where that is written down.
+wanted() {
+	rows=$(awk -F'\t' '/^#/ { next } NF >= 2 { print $1 "\t" $2 }' "$table")
+	[ -n "$rows" ] || die "sysroots/images has no rows in it"
+	if [ -n "$release" ]; then
+		rows=$(printf '%s\n' "$rows" | awk -F'\t' -v v="$release" '$1 == v')
+		[ -n "$rows" ] || die "sysroots/images has no image for glibc $release"
+	fi
+	printf '%s\n' "$rows"
+}
+
+# Every glibc release in sysroots/manifest that the table has no image for, said out loud. A row
+# that silently is not checked is the failure this whole script exists to avoid having elsewhere.
+unchecked() {
+	every=$(awk -F'\t' '$1 == "glibc" { print $2 }' "$pins")
+	for one in $every; do
+		awk -F'\t' -v v="$one" '/^#/ { next } $1 == v { found = 1 } END { exit !found }' "$table" ||
+			say "glibc $one has no image in sysroots/images, so it is not run anywhere"
+	done
+}
+
+# The programs, as the source and the file of expected output beside it. Everything in the corpus
+# that has an expectation, which is rung 0 of the ladder plus the directory written for this check.
+# corpus/layout has no expectations because those programs are read rather than run.
+programs() {
+	for source in "$here"/corpus/exec/*.c "$here"/corpus/abi/*.c "$here"/corpus/glibc/*.c; do
+		[ -f "${source%.c}.expected" ] || continue
+		printf '%s\n' "$source"
+	done
+}
+
+# The kernel headers for one architecture, assembled the way bin/glibc-headers assembles them: the
+# generic tree and then the per architecture one on top, because that is the order the compiler
+# would search them in if they were two directories.
+kernel_tree() {
+	[ -d "$cache/kernel-headers/generic" ] ||
+		die "the kernel headers are not in $cache, so run bin/kernel-headers first"
+	rm -rf "$2"
+	mkdir -p "$2"
+	cp -R "$cache/kernel-headers/generic/." "$2/"
+	cp -R "$cache/kernel-headers/$1/." "$2/"
+}
+
+# One program, one way, compiled against the merged tree and nothing else. -nostdlibinc rather than
+# -nostdinc, because the compiler's own headers are the compiler's to provide and a sysroot does not
+# carry stddef.h. __GLIBC_MINOR__ comes from the command line because the tree does not define it,
+# which is the patch bin/glibc-headers applies to features.h and the whole reason one tree can
+# answer for eight releases.
+compile() {
+	# shellcheck disable=SC2086
+	# The flags of a way are a list and have to arrive as separate words, and they are written in
+	# the table above rather than coming from anywhere else.
+	"$zig" cc -target "$target.$minor_release" -nostdlibinc \
+		-isystem "$tree/$family" -isystem "$tree/generic" -isystem "$kernel" \
+		-D__GLIBC_MINOR__="$minor" -Wno-unused-command-line-argument \
+		$3 "$1" -o "$2" -lm -lpthread >"$2.compile.log" 2>&1
+}
+
+run_one() {
+	image=$1
+	platform=$2
+	dir=$3
+
+	cat >"$dir/run" <<'RUNNER'
+#!/bin/sh
+# Written by bin/glibc-image-check and run inside the distribution image. One invocation for the
+# whole directory, because starting a container costs more than running any program in it, and the
+# emulated architecture costs more again.
+ldd --version 2>/dev/null | head -1 | awk '{ print $NF }' >out/version
+for one in bin/*; do
+	name=${one#bin/}
+	"./$one" >"out/$name.out" 2>"out/$name.err"
+	printf '%s\n' "$?" >"out/$name.status"
+done
+RUNNER
+	chmod +x "$dir/run"
+	mkdir -p "$dir/out"
+	docker run --rm --platform "$platform" --user "$(id -u):$(id -g)" \
+		-v "$dir:/w" -w /w "$image" /w/run >"$dir/docker.log" 2>&1 ||
+		die "$image on $platform did not run the programs, and the log is in $dir/docker.log"
+}
+
+produce() {
+	command -v docker >/dev/null 2>&1 ||
+		die "docker is not on the path, and the whole point of this check is somebody else's libc"
+	zig=$(zig)
+	tree=$cache/glibc-merged/tree
+	[ -f "$tree/manifest" ] ||
+		die "the merged tree is not in $cache, so run bin/glibc-merged first"
+
+	list=$(wanted)
+	unchecked
+
+	work=$cache/glibc-image-check
+	rm -rf "$work"
+	mkdir -p "$work"
+
+	failures=0
+	rows=0
+	while IFS='	' read -r minor_release image; do
+		[ -n "$minor_release" ] || continue
+		minor=${minor_release#2.}
+		[ "$minor" != "$minor_release" ] ||
+			die "glibc $minor_release is not a 2.x release and the minor number is what the compiler wants"
+
+		while IFS='	' read -r abi family karch target platform; do
+			[ -n "$abi" ] || continue
+			[ -z "$arch" ] || [ "$arch" = "$abi" ] || continue
+			[ -d "$tree/$family" ] ||
+				die "the merged tree has no $family directory, so it was not produced by bin/glibc-merged"
+
+			dir=$work/$minor_release-$abi
+			kernel=$dir/kernel
+			mkdir -p "$dir/bin"
+			kernel_tree "$karch" "$kernel"
+
+			built=0
+			for source in $(programs); do
+				name=$(basename "$source" .c)
+				while IFS='	' read -r way flags; do
+					[ -n "$way" ] || continue
+					compile "$source" "$dir/bin/$name.$way" "$flags" ||
+						die "$name did not compile for $abi at glibc $minor_release the $way way, \
+and the log is in $dir/bin/$name.$way.compile.log"
+					built=$((built + 1))
+				done <<WAYS
+$ways
+WAYS
+			done
+
+			run_one "$image" "$platform" "$dir"
+
+			# The image's own answer about which glibc it is, asked before anything it produced is
+			# believed. A tag that has moved to a newer release would otherwise pass every program
+			# here and mean nothing.
+			saw=$(cat "$dir/out/version" 2>/dev/null || true)
+			[ "$saw" = "$minor_release" ] ||
+				die "$image says its glibc is ${saw:-nothing}, and sysroots/images says it is $minor_release"
+
+			bad=
+			for source in $(programs); do
+				name=$(basename "$source" .c)
+				expected=${source%.c}.expected
+				while IFS='	' read -r way flags; do
+					[ -n "$way" ] || continue
+					status=$(cat "$dir/out/$name.$way.status" 2>/dev/null || true)
+					if [ "$status" != 0 ]; then
+						bad="$bad $name.$way"
+						say "$name.$way exited ${status:-with nothing} on $image as $abi:"
+						head -5 "$dir/out/$name.$way.err" >&2 2>/dev/null || true
+						continue
+					fi
+					cmp -s "$expected" "$dir/out/$name.$way.out" || {
+						bad="$bad $name.$way"
+						say "$name.$way printed something else on $image as $abi:"
+						diff -u "$expected" "$dir/out/$name.$way.out" >&2 || true
+					}
+				done <<WAYS
+$ways
+WAYS
+			done
+
+			rows=$((rows + 1))
+			if [ -n "$bad" ]; then
+				failures=$((failures + 1))
+				say "glibc $minor_release on $image as $abi: $built built, and these did not match:$bad"
+			else
+				say "glibc $minor_release on $image as $abi: $built built, $built ran and matched"
+			fi
+		done <<ARCHES
+$arches
+ARCHES
+	done <<LIST
+$list
+LIST
+
+	[ "$rows" -gt 0 ] || die "nothing was run, which means the tables above agree on nothing"
+	pairs="pairs of a release and an architecture"
+	[ "$rows" -ne 1 ] || pairs="pair of a release and an architecture"
+	[ "$failures" -eq 0 ] || die "$failures of the $rows $pairs did not match"
+	say "$rows $pairs built the corpus against our tree and ran it on theirs"
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--release)
+		[ $# -ge 2 ] || die "--release wants a version, as in --release 2.28"
+		release=$2
+		shift
+		;;
+	--arch)
+		[ $# -ge 2 ] || die "--arch wants an ABI, as in --arch aarch64"
+		arch=$2
+		shift
+		;;
+	*) die "unknown argument $1" ;;
+	esac
+	shift
+done
+produce
