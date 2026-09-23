@@ -4,6 +4,8 @@ The format is a section per change, newest first, written by hand. There are no 
 
 ## Unreleased
 
+`bin/abilist` takes `libm.abilist` and `librt.abilist` out of the pinned glibc as well as `libc.abilist`, for all eight architectures, and writes them beside it. The compiler packs its glibc description from all three, because section 9.9 of its stub specification says a glibc sysroot needs real libm and librt stubs and not empty ones. librt is small everywhere and empty on loongarch64, which has never had anything in it.
+
 `bin/artifact kernel-headers` packs the Linux uapi tree `bin/kernel-headers` produces into `rucc-kernel-headers.tar.gz`, by the same reproducible pipeline a sysroot goes through, and `--against` finds its row in the compiler's PROVENANCE, which names it on a `tree` line after the targets. It is one archive for every Linux target rather than a part of each sysroot, because the compiler keeps it in one directory beside the sysroots and `--fetch` of a Linux target installs it after the target's own tree. The four musl sysroots and this tree are published in the release `sysroots-2026-09-23`, and they come out byte for byte the same on two hosts.
 
 The nightly run has a `linux-sysroots` job that produces the kernel tree and the four musl sysroots on both host architectures, packs them and holds each archive against the hash the compiler pins, the same check the windows-gnu sysroots have had since they were published.
