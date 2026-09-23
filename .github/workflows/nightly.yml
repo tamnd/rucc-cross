@@ -519,6 +519,45 @@ jobs:
           ./bin/artifact --against rucc/PROVENANCE \
             x86_64-windows-gnu i686-windows-gnu aarch64-windows-gnu
 
+  # The Linux sysroots the compiler pins, which are the four musl targets and the kernel header tree
+  # every Linux target fetches beside its own, produced from source and held against those pins the
+  # same way the windows-gnu job above holds its three. The same two host architectures for the same
+  # reason, and nothing cached for the same reason: a cache hit would compare a file against the hash
+  # of the run that produced it. The kernel tree is produced once and packed once, because it is one
+  # archive whatever the target is.
+  linux-sysroots:
+    name: the Linux sysroots on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
+      - name: install zig
+        run: ./toolchains/install zig
+      - name: produce the kernel tree and the four musl sysroots
+        run: |
+          ./bin/kernel-headers
+          ./bin/sysroot x86_64-linux-musl aarch64-linux-musl riscv64-linux-musl armv7-linux-musleabihf
+      - name: pack them
+        run: |
+          ./bin/artifact kernel-headers x86_64-linux-musl aarch64-linux-musl riscv64-linux-musl \
+            armv7-linux-musleabihf
+      - name: hold them against what the compiler pins
+        run: |
+          ./bin/artifact --against rucc/PROVENANCE kernel-headers x86_64-linux-musl \
+            aarch64-linux-musl riscv64-linux-musl armv7-linux-musleabihf
+
   # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
   # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
   # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
@@ -584,6 +623,7 @@ jobs:
       - glibc-merged-reproducible
       - glibc-image-check
       - mingw-sysroots
+      - linux-sysroots
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
@@ -601,7 +641,7 @@ jobs:
       # releases counts twice, once for the merge refusing its own output and once for the two hosts
       # disagreeing about the bytes. Running that tree on the distributions counts hardest of the
       # header jobs, because it is the only one whose failure is a binary that does not start on
-      # somebody's machine rather than two files that differ. The windows-gnu sysroots are
+      # somebody's machine rather than two files that differ. The windows-gnu and Linux sysroots are
       # the strongest of the lot: a produced archive that no longer hashes to what the compiler pins
       # means either the recipe moved or the published file is not what the recipe makes, and both of
       # those are somebody here finding out before a user does.
@@ -620,6 +660,7 @@ jobs:
           || needs.glibc-merged-reproducible.result != 'success'
           || needs.glibc-image-check.result != 'success'
           || needs.mingw-sysroots.result != 'success'
+          || needs.linux-sysroots.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"
