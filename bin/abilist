@@ -16,6 +16,10 @@
 #
 # With no argument it does every architecture in the table below. It writes $cache/abilists/<arch>/
 # libc.abilist, which is the layout the xtask side looks in, and prints the directory to hand it.
+# libm.abilist and librt.abilist go beside it. Section 9.9 of the same document says both libraries
+# have to exist in a glibc sysroot as real stubs rather than empty ones, because `sin` is in libm on
+# every glibc there has been and librt has been moving into libc one release at a time, so the
+# compiler's description blob is packed from all three and not from libc alone.
 #
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so the download survives a
 # branch switch. Doing this twice is a no-op, because a file that is already extracted is left alone.
@@ -37,7 +41,7 @@ sha256() {
 	fi
 }
 
-# Where in glibc's source tree the abilist for an architecture is, keyed by the name the compiler
+# Where in glibc's source tree the abilists for an architecture are, keyed by the name the compiler
 # calls that architecture. The names on the left are the ones rustc and the target table use, because
 # the xtask side looks up the directory by the architecture it is running on and that is the spelling
 # it has. The paths on the right are glibc's own layout, which sorts by kernel first and then by
@@ -50,23 +54,27 @@ sha256() {
 # The one row in the table with nothing here is x86_64-linux-gnux32, which shares an architecture name
 # with x86_64 and so cannot be told from it by the key this is keyed on. A host that runs x32 is the
 # day to give it a name of its own.
-abilist_path() {
+abilist_dir() {
 	case $1 in
-	x86_64) printf 'sysdeps/unix/sysv/linux/x86_64/64/libc.abilist\n' ;;
-	x86) printf 'sysdeps/unix/sysv/linux/i386/libc.abilist\n' ;;
-	aarch64) printf 'sysdeps/unix/sysv/linux/aarch64/libc.abilist\n' ;;
-	arm) printf 'sysdeps/unix/sysv/linux/arm/le/libc.abilist\n' ;;
-	riscv64) printf 'sysdeps/unix/sysv/linux/riscv/rv64/libc.abilist\n' ;;
-	powerpc64) printf 'sysdeps/unix/sysv/linux/powerpc/powerpc64/le/libc.abilist\n' ;;
+	x86_64) printf 'sysdeps/unix/sysv/linux/x86_64/64\n' ;;
+	x86) printf 'sysdeps/unix/sysv/linux/i386\n' ;;
+	aarch64) printf 'sysdeps/unix/sysv/linux/aarch64\n' ;;
+	arm) printf 'sysdeps/unix/sysv/linux/arm/le\n' ;;
+	riscv64) printf 'sysdeps/unix/sysv/linux/riscv/rv64\n' ;;
+	powerpc64) printf 'sysdeps/unix/sysv/linux/powerpc/powerpc64/le\n' ;;
 	# One file rather than the s390-32 and s390-64 pair an older glibc had, because the 31 bit port
 	# went and the directory with it.
-	s390x) printf 'sysdeps/unix/sysv/linux/s390/libc.abilist\n' ;;
-	loongarch64) printf 'sysdeps/unix/sysv/linux/loongarch/lp64/libc.abilist\n' ;;
+	s390x) printf 'sysdeps/unix/sysv/linux/s390\n' ;;
+	loongarch64) printf 'sysdeps/unix/sysv/linux/loongarch/lp64\n' ;;
 	*) die "$1 is not an architecture this knows the abilist path for" ;;
 	esac
 }
 
 all="x86_64 x86 aarch64 arm riscv64 powerpc64 s390x loongarch64"
+
+# The libraries taken out of each directory. Every port has all three, so a missing one is a moved
+# path in a new glibc and tar says so by name.
+libs="libc libm librt"
 
 # The pinned glibc line from sysroots/manifest, which is where a libc source belongs whatever is
 # taken out of it. M9.5 builds a sysroot from this same row.
@@ -85,8 +93,10 @@ fi
 into=$cache/abilists
 missing=
 for arch in $arches; do
-	abilist_path "$arch" >/dev/null
-	[ -f "$into/$arch/libc.abilist" ] || missing="$missing $arch"
+	abilist_dir "$arch" >/dev/null
+	for lib in $libs; do
+		[ -f "$into/$arch/$lib.abilist" ] || { missing="$missing $arch"; break; }
+	done
 done
 
 if [ -n "$missing" ]; then
@@ -109,7 +119,9 @@ if [ -n "$missing" ]; then
 	# extracting nothing.
 	members=
 	for arch in $missing; do
-		members="$members glibc-$version/$(abilist_path "$arch")"
+		for lib in $libs; do
+			members="$members glibc-$version/$(abilist_dir "$arch")/$lib.abilist"
+		done
 	done
 	work=$cache/abilists.part
 	rm -rf "$work"
@@ -121,8 +133,10 @@ if [ -n "$missing" ]; then
 
 	for arch in $missing; do
 		mkdir -p "$into/$arch"
-		cp "$work/glibc-$version/$(abilist_path "$arch")" "$into/$arch/libc.abilist.part"
-		mv "$into/$arch/libc.abilist.part" "$into/$arch/libc.abilist"
+		for lib in $libs; do
+			cp "$work/glibc-$version/$(abilist_dir "$arch")/$lib.abilist" "$into/$arch/$lib.abilist.part"
+			mv "$into/$arch/$lib.abilist.part" "$into/$arch/$lib.abilist"
+		done
 	done
 	rm -rf "$work"
 
@@ -135,7 +149,9 @@ fi
 # One line per symbol, counting the GLIBC_PRIVATE ones that a stub leaves out, so this is the size of
 # the description rather than the size of the stub. The xtask side prints both.
 for arch in $arches; do
-	printf '%-10s %s lines\n' "$arch" "$(wc -l <"$into/$arch/libc.abilist" | tr -d ' ')"
+	for lib in $libs; do
+		printf '%-10s %-6s %s lines\n' "$arch" "$lib" "$(wc -l <"$into/$arch/$lib.abilist" | tr -d ' ')"
+	done
 done
 say "the abilists of glibc $version are in $into"
 say "the compiler reads them from there as RUCC_ABILISTS=$into cargo xtask real-libc"
