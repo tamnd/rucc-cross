@@ -2,6 +2,7 @@
 # Pack a produced sysroot into the archive a rucc release pins, and print what the pin has to say.
 #
 # usage: bin/artifact <target>...
+#        bin/artifact kernel-headers
 #        bin/artifact --against <PROVENANCE> <target>...
 #
 # The last step of producing a sysroot and the first step of shipping one. `rucc_sysroot::artifact`
@@ -30,6 +31,14 @@
 # for it. That is a real limit and it is checked rather than worked around: a sysroot packed with an
 # unsorted member list is an archive whose hash depends on a directory walk, which is exactly the
 # thing this is here to prevent.
+#
+# kernel-headers in place of a target packs the Linux uapi tree bin/kernel-headers produces, which is
+# one tree for every Linux target rather than a part of each one, and so it is its own archive the
+# same way it is its own directory in the compiler's cache. A Linux sysroot is fetched as two files,
+# its own and this one, and the second is shared by every Linux target a machine has fetched. The
+# archive has the same shape as a sysroot's, with the tree's own `manifest` at the top beside the
+# per architecture directories and `generic`, and it is packed by the same pipeline for the same
+# reasons.
 #
 # The cache is $RUCC_CROSS_CACHE, the same one the producers write into, and the archives land in
 # artifacts/ beside sysroots/ rather than inside the tree they are made of, because a sysroot that
@@ -72,15 +81,24 @@ gnu_tar() {
 
 pack() {
 	target=$1
-	root=$cache/sysroots/$target
-	[ -f "$root/manifest" ] ||
-		die "no sysroot for $target has been produced, so there is nothing to pack"
-	awk -F'\t' -v t="$target" 'NR == 2 && $1 == "target" && $2 == t { found = 1 } END { exit !found }' \
-		"$root/manifest" ||
-		die "$root/manifest does not say it is the sysroot for $target"
+	if [ "$target" = kernel-headers ]; then
+		root=$cache/kernel-headers
+		[ -f "$root/manifest" ] ||
+			die "no kernel header tree has been produced, so run bin/kernel-headers first"
+		[ "$(head -1 "$root/manifest")" = "rucc kernel headers manifest 1" ] ||
+			die "$root/manifest is not the record of a kernel header tree"
+		out=$cache/artifacts/$(archive_name "$target")
+	else
+		root=$cache/sysroots/$target
+		[ -f "$root/manifest" ] ||
+			die "no sysroot for $target has been produced, so there is nothing to pack"
+		awk -F'\t' -v t="$target" 'NR == 2 && $1 == "target" && $2 == t { found = 1 } END { exit !found }' \
+			"$root/manifest" ||
+			die "$root/manifest does not say it is the sysroot for $target"
+		out=$cache/artifacts/$(archive_name "$target")
+	fi
 
 	tar=$(gnu_tar)
-	out=$cache/artifacts/rucc-sysroot-$target.tar.gz
 	mkdir -p "$cache/artifacts"
 
 	# One pipeline rather than tar's own -z, because gzip needs -n and tar has no way to pass it on.
@@ -97,10 +115,20 @@ pack() {
 
 # The field of PROVENANCE's row for one target, or nothing if the release pins nothing for it. One
 # call per field rather than one call returning the row, because splitting a tab separated line back
-# up in the shell is the sort of thing that works until a value is empty.
+# up in the shell is the sort of thing that works until a value is empty. The kernel tree's row starts
+# with `tree` rather than `target`, and the fields after the name are in the same places.
 pinned() {
 	awk -F'\t' -v t="$2" -v n="$3" \
-		'$1 == "target" && $2 == t && $3 == "pinned" { print $n; exit }' "$1"
+		'($1 == "target" || $1 == "tree") && $2 == t && $3 == "pinned" { print $n; exit }' "$1"
+}
+
+# The file one name is packed into.
+archive_name() {
+	if [ "$1" = kernel-headers ]; then
+		printf 'rucc-kernel-headers.tar.gz\n'
+	else
+		printf 'rucc-sysroot-%s.tar.gz\n' "$1"
+	fi
 }
 
 # One target's archive against the row PROVENANCE has for it. A target with no row is not a failure
@@ -111,7 +139,8 @@ pinned() {
 against() {
 	provenance=$1
 	target=$2
-	out=$cache/artifacts/rucc-sysroot-$target.tar.gz
+	name=$(archive_name "$target")
+	out=$cache/artifacts/$name
 	[ -f "$out" ] || die "$out has not been packed, so there is nothing to hold against the pin"
 
 	url=$(pinned "$provenance" "$target" 4)
@@ -121,8 +150,8 @@ against() {
 		return 0
 	fi
 
-	[ "${url##*/}" = "rucc-sysroot-$target.tar.gz" ] ||
-		die "$target: the pinned URL names ${url##*/} and this packs rucc-sysroot-$target.tar.gz"
+	[ "${url##*/}" = "$name" ] ||
+		die "$target: the pinned URL names ${url##*/} and this packs $name"
 
 	have=$(sha256 "$out")
 	if [ "$have" = "$want" ]; then
