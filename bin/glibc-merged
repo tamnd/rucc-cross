@@ -186,8 +186,10 @@ and $moved copies of them were pushed down into the families"
 	say "merging $count releases, $(printf '%s' "$list" | tr '\n' ' ')"
 	# shellcheck disable=SC2086
 	# The arguments are a list and have to arrive as separate words. Every one of them is built above.
+	# What the merge reports goes to stderr with everything else this says, because stdout is the
+	# path of the record and a caller reads it with $(...).
 	(cd "$src" && cargo run -q -p rucc-headers --release -- \
-		$args --out "$work/tree" --listing "$work/listing") ||
+		$args --out "$work/tree" --listing "$work/listing") >&2 ||
 		die "the merge refused its own output, and what it said is above"
 
 	for version in $list; do
