@@ -1,0 +1,182 @@
+#!/bin/sh
+# Assemble a glibc sysroot for a target, laid out the way rucc-sysroot reads one, with a manifest.
+#
+# usage: bin/glibc-sysroot <target>...
+#        bin/glibc-sysroot --force <target>...
+#        bin/glibc-sysroot --check <manifest> <manifest>
+#
+# bin/sysroot is the musl producer and it builds everything it ships. This one builds nothing. The
+# two halves of a glibc sysroot are already produced by two other scripts, and what is left is
+# putting them where the compiler looks and writing down what they are:
+#
+# - bin/glibc-merged leaves one header tree for every release in sysroots/manifest, split into
+#   `generic` and one directory per architecture family, x86, aarch64, arm, riscv, powerpcle, s390x
+#   and loongarch. A target gets `generic` and its own family, and those two become include/generic
+#   and include/<family>, which is what `Sysroot::header_arch` in the compiler answers for a glibc
+#   target. The release a program sees is picked inside the files by __GLIBC_MINOR__, which the
+#   compiler defines from the tuple, so one sysroot serves every release.
+# - bin/glibc-startfiles leaves crt1.o, Scrt1.o, rcrt1.o, the profiling three, crti.o, crtn.o and
+#   libc_nonshared.a for every glibc ABI, out of glibc's own csu makefile. A target gets its ABI's
+#   nine files in lib.
+#
+# What is not here is libc.so and the other shared objects. The compiler writes those itself before
+# a glibc link, out of the description it carries, into a directory beside the sysroot rather than
+# inside it, so they are not in this manifest and the archive does not grow with them.
+#
+# The start files are glibc 2.44's, whatever release a target pins. That is right for every one of
+# them but libc_nonshared.a on a release before 2.33, which had the stat family in it, and a program
+# pinned that far back that calls stat gets an undefined symbol rather than a wrong binary.
+#
+# The manifest is version 3, the same as bin/sysroot's, so the compiler reads both the same way.
+# Every file is generated, the headers because the merge wrote them and the objects because a
+# compiler did. The source of a header is glibc-merged and its URL is the pinned glibc release,
+# which is the newest one in the merge; the source of an object is the release it was built from.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. Assembling a sysroot that
+# is already there is a no-op unless --force is given.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+merged=$cache/glibc-merged/tree
+startfiles=$cache/glibc-startfiles
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-sysroot: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The header family and the start file ABI for a target, as two words. The family is the directory
+# name in bin/glibc-merged's tree and the ABI is the one in bin/glibc-startfiles', and they differ
+# because the headers of x86_64 and i386 are one family and their objects are two builds.
+#
+# x32 is left out on purpose. The compiler's stub description has no x32 section, so a sysroot for it
+# would link against nothing.
+layout() {
+	case $1 in
+	x86_64-linux-gnu) printf 'x86 x86_64\n' ;;
+	i686-linux-gnu) printf 'x86 i386\n' ;;
+	aarch64-linux-gnu) printf 'aarch64 aarch64\n' ;;
+	armv7-linux-gnueabihf) printf 'arm arm\n' ;;
+	riscv64-linux-gnu) printf 'riscv riscv64\n' ;;
+	powerpc64le-linux-gnu) printf 'powerpcle powerpc64\n' ;;
+	s390x-linux-gnu) printf 's390x s390x\n' ;;
+	loongarch64-linux-gnu) printf 'loongarch loongarch64\n' ;;
+	*) die "$1 is not one of the glibc targets this assembles" ;;
+	esac
+}
+
+# The same kernel line bin/sysroot writes, read out of the kernel tree's own record.
+kernel_release() {
+	record=$cache/kernel-headers/manifest
+	[ -f "$record" ] || return 0
+	head -1 "$record" | grep -q '^rucc kernel headers manifest ' ||
+		die "$record does not start like a kernel headers record"
+	awk -F'\t' '$1 == "linux" { print $2; exit }' "$record"
+}
+
+# Every file under a directory as manifest lines, sorted in the C locale for the reason bin/sysroot
+# gives. The source and the URL depend on whether the file is a header or an object, which the path
+# says.
+manifest_lines() {
+	walk_root=$1
+	walk_objects=$2
+	walk_url=$3
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			case $walk_file in
+			include/*) walk_source=glibc-merged ;;
+			*) walk_source=$walk_objects ;;
+			esac
+			printf '%s\t%s\t%s\t%s\tlgpl\tgenerated\n' \
+				"$walk_file" "$walk_source" "$walk_url" "$(sha256 "$walk_file")"
+		done
+	)
+}
+
+produce() {
+	target=$1
+	pair=$(layout "$target")
+	family=${pair% *}
+	abi=${pair#* }
+	root=$cache/sysroots/$target
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "$target is already assembled in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	[ -d "$merged/generic" ] || die "$merged is not there, so run bin/glibc-merged first"
+	[ -d "$merged/$family" ] || die "$merged has no $family, so bin/glibc-merged is out of date"
+	[ -f "$startfiles/$abi/libc_nonshared.a" ] ||
+		die "$startfiles has no $abi, so run bin/glibc-startfiles first"
+
+	# The release the objects were built from, out of their own record rather than out of the pin,
+	# for the reason bin/sysroot reads the kernel's out of its record.
+	built=$(awk -F'\t' '$1 == "glibc" { print $2; exit }' "$startfiles/manifest")
+	[ -n "$built" ] || die "$startfiles/manifest does not say which glibc it was built from"
+	url=$(awk -F'\t' '$1 == "glibc" { print $5; exit }' "$pins")
+
+	rm -rf "$root.part"
+	mkdir -p "$root.part/include/generic" "$root.part/include/$family" "$root.part/lib"
+	cp -R "$merged/generic/." "$root.part/include/generic/"
+	cp -R "$merged/$family/." "$root.part/include/$family/"
+	cp "$startfiles/$abi"/*.o "$startfiles/$abi/libc_nonshared.a" "$root.part/lib/"
+	# The merge's own record is a statement about the tree and not a file in it, the same reason
+	# bin/glibc-merged leaves each input's manifest out.
+	rm -f "$root.part/include/generic/manifest" "$root.part/include/$family/manifest"
+
+	kernel=$(kernel_release)
+	{
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		[ -z "$kernel" ] || printf 'kernel\t%s\n' "$kernel"
+		manifest_lines "$root.part" "glibc-$built" "$url"
+	} >"$root.part/manifest"
+
+	rm -rf "$root"
+	mv "$root.part" "$root"
+	say "$target is in $root, $(grep -c '' "$root/manifest") manifest lines"
+	printf '%s\n' "$root/manifest"
+}
+
+check() {
+	[ -f "$1" ] || die "$1 is not a file"
+	[ -f "$2" ] || die "$2 is not a file"
+	if cmp -s "$1" "$2"; then
+		say "the two manifests are identical, $(grep -c '' "$1") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$1" "$2" >&2 || true
+	return 1
+}
+
+[ $# -gt 0 ] || die "usage: bin/glibc-sysroot <target>... or bin/glibc-sysroot --check <manifest> <manifest>"
+
+case $1 in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/glibc-sysroot --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	shift
+	[ $# -gt 0 ] || die "usage: bin/glibc-sysroot --force <target>..."
+	for target in "$@"; do produce "$target"; done
+	;;
+-*) die "unknown option $1" ;;
+*)
+	for target in "$@"; do produce "$target"; done
+	;;
+esac
