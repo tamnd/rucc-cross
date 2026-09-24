@@ -4,6 +4,8 @@ The format is a section per change, newest first, written by hand. There are no 
 
 ## Unreleased
 
+`bin/glibc-stat` builds the stat family that glibc kept in libc_nonshared.a before 2.33: `stat`, `fstat`, `lstat`, `fstatat`, `mknod`, `mknodat` and the four 64-bit spellings, each a call to its `__x` counterpart with the structure version out of glibc's own headers read as 2.31. It builds them for the seven glibc ABIs that have a release that old, and `bin/glibc-sysroot` puts the archive in lib as `libc_nonshared_stat.a` beside glibc 2.44's `libc_nonshared.a`, which no longer has them. Without it a program pinned to 2.28 or 2.31 that calls `stat` linked at -O2, where the old headers inline the call, and failed at -O0 with an undefined `stat`. The archive is the same bytes on server2 and server3, and the nightly `glibc-sysroots` job builds it before it assembles the sysroots.
+
 `bin/glibc-merged` sends the merge's report to stderr. The compiler's merge started printing its counts on stdout, so a caller that read the record's path with `$(...)` got the counts as well, and the nightly `glibc-merged` job has failed on its `cp` since 2026-09-22. Stdout is the path again and nothing else.
 
 The nightly run has a `glibc-sysroots` job that assembles the eight glibc sysroots on both host architectures from the merged tree and the start files the `glibc-merged` and `glibc-startfiles` jobs produced on the same kind of runner, packs them and holds each archive against the hash the compiler pins. Those two jobs now upload their trees as well as their records, so the assembly takes minutes rather than building the inputs a second time.

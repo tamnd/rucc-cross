@@ -6,7 +6,7 @@
 #        bin/glibc-sysroot --check <manifest> <manifest>
 #
 # bin/sysroot is the musl producer and it builds everything it ships. This one builds nothing. The
-# two halves of a glibc sysroot are already produced by two other scripts, and what is left is
+# three parts of a glibc sysroot are already produced by three other scripts, and what is left is
 # putting them where the compiler looks and writing down what they are:
 #
 # - bin/glibc-merged leaves one header tree for every release in sysroots/manifest, split into
@@ -18,14 +18,16 @@
 # - bin/glibc-startfiles leaves crt1.o, Scrt1.o, rcrt1.o, the profiling three, crti.o, crtn.o and
 #   libc_nonshared.a for every glibc ABI, out of glibc's own csu makefile. A target gets its ABI's
 #   nine files in lib.
+# - bin/glibc-stat leaves libc_nonshared_stat.a for every ABI that has a glibc older than 2.33,
+#   which is all of them but loongarch64. It goes in lib beside libc_nonshared.a.
 #
 # What is not here is libc.so and the other shared objects. The compiler writes those itself before
 # a glibc link, out of the description it carries, into a directory beside the sysroot rather than
 # inside it, so they are not in this manifest and the archive does not grow with them.
 #
 # The start files are glibc 2.44's, whatever release a target pins. That is right for every one of
-# them but libc_nonshared.a on a release before 2.33, which had the stat family in it, and a program
-# pinned that far back that calls stat gets an undefined symbol rather than a wrong binary.
+# them but libc_nonshared.a on a release before 2.33, which had the stat family in it. That family is
+# the second archive, which the compiler puts on the line only for a release that old.
 #
 # The manifest is version 3, the same as bin/sysroot's, so the compiler reads both the same way.
 # Every file is generated, the headers because the merge wrote them and the objects because a
@@ -42,6 +44,7 @@ cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
 pins=$here/sysroots/manifest
 merged=$cache/glibc-merged/tree
 startfiles=$cache/glibc-startfiles
+stat=$cache/glibc-stat
 force=
 
 say() { printf '%s\n' "$*" >&2; }
@@ -94,12 +97,21 @@ manifest_lines() {
 	(
 		cd "$walk_root" || exit 1
 		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			walk_licence=lgpl
+			walk_from=$walk_url
 			case $walk_file in
 			include/*) walk_source=glibc-merged ;;
+			# Written in this repository rather than taken from glibc, so it carries this
+			# repository's name, address and licence.
+			lib/libc_nonshared_stat.a)
+				walk_source=rucc-cross
+				walk_from=https://github.com/tamnd/rucc-cross
+				walk_licence=apache-2.0
+				;;
 			*) walk_source=$walk_objects ;;
 			esac
-			printf '%s\t%s\t%s\t%s\tlgpl\tgenerated\n' \
-				"$walk_file" "$walk_source" "$walk_url" "$(sha256 "$walk_file")"
+			printf '%s\t%s\t%s\t%s\t%s\tgenerated\n' \
+				"$walk_file" "$walk_source" "$walk_from" "$(sha256 "$walk_file")" "$walk_licence"
 		done
 	)
 }
@@ -133,6 +145,11 @@ produce() {
 	cp -R "$merged/generic/." "$root.part/include/generic/"
 	cp -R "$merged/$family/." "$root.part/include/$family/"
 	cp "$startfiles/$abi"/*.o "$startfiles/$abi/libc_nonshared.a" "$root.part/lib/"
+	if [ "$abi" != loongarch64 ]; then
+		[ -f "$stat/$abi/libc_nonshared_stat.a" ] ||
+			die "$stat has no $abi, so run bin/glibc-stat first"
+		cp "$stat/$abi/libc_nonshared_stat.a" "$root.part/lib/"
+	fi
 	# The merge's own record is a statement about the tree and not a file in it, the same reason
 	# bin/glibc-merged leaves each input's manifest out.
 	rm -f "$root.part/include/generic/manifest" "$root.part/include/$family/manifest"

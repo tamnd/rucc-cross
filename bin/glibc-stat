@@ -1,0 +1,163 @@
+#!/bin/sh
+# Build the stat family glibc kept in libc_nonshared.a before 2.33, for every glibc ABI that has a
+# release that old.
+#
+# usage: bin/glibc-stat
+#        bin/glibc-stat --force
+#
+# Before glibc 2.33, `stat`, `fstat`, `lstat`, `fstatat`, `mknod`, `mknodat` and the four 64-bit
+# spellings were not in libc.so.6 at all. libc.so.6 had `__xstat` and its siblings, which take a
+# version of the structure as a first argument, and the names a program calls were ten small
+# functions in libc_nonshared.a that pass that version along. glibc 2.33 moved them into the
+# shared library under GLIBC_2.33 and took them out of the archive.
+#
+# bin/glibc-startfiles builds libc_nonshared.a from glibc 2.44, so a program pinned to 2.28 or 2.31
+# that calls `stat` has nothing to link it to. At -O2 the old headers turn the call into `__xstat`
+# inline and it links, and at -O0 they do not. This builds the ten functions the way the 2.32 io
+# directory did, each one a call to its `__x` counterpart with `_STAT_VER` or `_MKNOD_VER`, against
+# the merged header tree read as 2.31, so the version numbers come out of glibc's own headers for
+# each ABI rather than out of this file. The unprefixed names are weak and every symbol is hidden,
+# as glibc's were, so a shared library linked against the archive does not export them.
+#
+# The output is $RUCC_CROSS_CACHE/glibc-stat/<abi>/libc_nonshared_stat.a, one member per function,
+# and a manifest in $RUCC_CROSS_CACHE/glibc-stat/manifest. x32 and loongarch64 are not built: the
+# compiler has no x32 stub, and loongarch64's first glibc is 2.36.
+#
+# Compiled with the pinned zig, members in C locale order and written by zig's ar, which records no
+# timestamps, for the reason bin/glibc-startfiles gives. Two hosts have to write the same bytes.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+merged=$cache/glibc-merged/tree
+kernel=$cache/kernel-headers
+out=$cache/glibc-stat
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-stat: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+zig() {
+	version=$(awk '$1 == "zig" { print $2; exit }' "$here/toolchains/manifest")
+	path=$cache/zig-$version/zig
+	[ -x "$path" ] || die "zig $version is not in the cache, so run toolchains/install zig"
+	printf '%s\n' "$path"
+}
+
+# The tuple, the ABI, the header family in bin/glibc-merged's tree, the kernel architecture in
+# bin/kernel-headers' tree, and zig's spelling of the target pinned at 2.31, which is the newest
+# release in the merge older than 2.33 and what makes zig define __GLIBC_MINOR__ as 31.
+rows='x86_64-linux-gnu	x86_64	x86	x86	x86_64-linux-gnu.2.31
+i686-linux-gnu	i386	x86	x86	x86-linux-gnu.2.31
+aarch64-linux-gnu	aarch64	aarch64	arm64	aarch64-linux-gnu.2.31
+armv7-linux-gnueabihf	arm	arm	arm	arm-linux-gnueabihf.2.31
+riscv64-linux-gnu	riscv64	riscv	riscv	riscv64-linux-gnu.2.31
+powerpc64le-linux-gnu	powerpc64	powerpcle	powerpc	powerpc64le-linux-gnu.2.31
+s390x-linux-gnu	s390x	s390x	s390	s390x-linux-gnu.2.31'
+
+# One member: its name, its return and parameter list, and the call it makes. The four names glibc
+# gave a double underscore alias to are the ones with a weak alias here, and the other six are plain,
+# which is how the 2.32 sources were written.
+members='stat	weak	const char *file, struct stat *buf	__xstat (_STAT_VER, file, buf)
+fstat	weak	int fd, struct stat *buf	__fxstat (_STAT_VER, fd, buf)
+lstat	weak	const char *file, struct stat *buf	__lxstat (_STAT_VER, file, buf)
+mknod	weak	const char *path, mode_t mode, dev_t dev	__xmknod (_MKNOD_VER, path, mode, &dev)
+fstatat	plain	int fd, const char *file, struct stat *buf, int flag	__fxstatat (_STAT_VER, fd, file, buf, flag)
+mknodat	plain	int fd, const char *path, mode_t mode, dev_t dev	__xmknodat (_MKNOD_VER, fd, path, mode, &dev)
+stat64	plain	const char *file, struct stat64 *buf	__xstat64 (_STAT_VER, file, buf)
+fstat64	plain	int fd, struct stat64 *buf	__fxstat64 (_STAT_VER, fd, buf)
+lstat64	plain	const char *file, struct stat64 *buf	__lxstat64 (_STAT_VER, file, buf)
+fstatat64	plain	int fd, const char *file, struct stat64 *buf, int flag	__fxstatat64 (_STAT_VER, fd, file, buf, flag)'
+
+# The source of one member. _GNU_SOURCE for the 64-bit spellings and the at family, and nothing
+# that sets _FILE_OFFSET_BITS, because on i386 and arm that would rename `stat` to `stat64` in the
+# header and the two members would define the same symbol.
+source_of() {
+	printf '#define _GNU_SOURCE 1\n#include <sys/stat.h>\n\n'
+	if [ "$2" = weak ]; then
+		printf '__attribute__ ((visibility ("hidden"))) int __%s (%s)\n{\n  return %s;\n}\n' \
+			"$1" "$3" "$4"
+		printf 'extern __typeof (__%s) %s\n  __attribute__ ((weak, alias ("__%s"), visibility ("hidden")));\n' \
+			"$1" "$1" "$1"
+	else
+		printf '__attribute__ ((visibility ("hidden"))) int %s (%s)\n{\n  return %s;\n}\n' \
+			"$1" "$3" "$4"
+	fi
+}
+
+build() {
+	tuple=$1
+	abi=$2
+	family=$3
+	karch=$4
+	target=$5
+
+	work=$out/$abi.part
+	rm -rf "$work"
+	mkdir -p "$work/src" "$work/obj"
+
+	printf '%s\n' "$members" | while IFS='	' read -r name kind params call; do
+		source_of "$name" "$kind" "$params" "$call" >"$work/src/$name.c"
+		# -Os because the old headers define the stat family as extern inline functions when
+		# optimizing for speed, and a definition of the same name after one of those is an error.
+		# -I rather than -isystem, because zig puts its own glibc headers on the system search
+		# path whatever -nostdinc says, and only a -I directory is searched before them.
+		"$zig" cc -target "$target" -c -Os -g0 -fPIC -fno-stack-protector \
+			-Wall -Wextra -Werror -Wno-unused-command-line-argument \
+			-I"$merged/$family" -I"$merged/generic" -I"$kernel/$karch" -I"$kernel/generic" \
+			-o "$work/obj/$name.oS" "$work/src/$name.c" ||
+			die "$name for $tuple did not compile"
+	done
+
+	(
+		cd "$work/obj"
+		# shellcheck disable=SC2046
+		"$zig" ar rcs ../libc_nonshared_stat.a $(printf '%s\n' ./*.oS | LC_ALL=C sort)
+	) || die "the archive for $tuple was not written"
+
+	rm -rf "${out:?}/$abi"
+	mkdir -p "$out/$abi"
+	mv "$work/libc_nonshared_stat.a" "$out/$abi/"
+	rm -rf "$work"
+	say "$tuple: $out/$abi/libc_nonshared_stat.a"
+}
+
+case ${1:-} in
+--force) force=yes ;;
+'') ;;
+*) die "usage: bin/glibc-stat [--force]" ;;
+esac
+
+if [ -f "$out/manifest" ] && [ -z "$force" ]; then
+	say "the stat family is already built in $out"
+	printf '%s\n' "$out/manifest"
+	exit 0
+fi
+
+[ -d "$merged/generic" ] || die "$merged is not there, so run bin/glibc-merged first"
+[ -d "$kernel/generic" ] || die "$kernel is not there, so run bin/kernel-headers first"
+zig=$(zig)
+
+rm -f "$out/manifest"
+printf '%s\n' "$rows" | while IFS='	' read -r tuple abi family karch target; do
+	build "$tuple" "$abi" "$family" "$karch" "$target"
+done
+
+{
+	printf 'rucc glibc stat manifest 1\n'
+	printf '%s\n' "$rows" | while IFS='	' read -r tuple abi _; do
+		printf '%s\t%s\t%s\n' "$tuple" "$abi/libc_nonshared_stat.a" \
+			"$(sha256 "$out/$abi/libc_nonshared_stat.a")"
+	done
+} >"$out/manifest.part"
+mv "$out/manifest.part" "$out/manifest"
+printf '%s\n' "$out/manifest"
