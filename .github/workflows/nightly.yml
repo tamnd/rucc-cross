@@ -615,6 +615,7 @@ jobs:
           tar -xzf glibc-merged.tar.gz -C "$HOME/.cache/rucc-cross"
           tar -xzf glibc-startfiles.tar.gz -C "$HOME/.cache/rucc-cross"
           ./bin/kernel-headers
+          ./bin/glibc-stat
           ./bin/glibc-sysroot x86_64-linux-gnu i686-linux-gnu aarch64-linux-gnu \
             armv7-linux-gnueabihf riscv64-linux-gnu powerpc64le-linux-gnu s390x-linux-gnu \
             loongarch64-linux-gnu
