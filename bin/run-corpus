@@ -104,6 +104,7 @@ for tuple in $tuples; do
 	# bin/compile-corpus, which is `-c` and needs no libc.
 	link=-static
 	reason=""
+	prefix=""
 	case $tuple in
 	*-macos | *-ios*)
 		link=""
@@ -113,17 +114,30 @@ for tuple in $tuples; do
 		;;
 	*-linux-gnu | *-linux-gnu.* | *-linux-gnueabi* | *-linux-gnux32)
 		link=""
+		# Unless the distribution's cross packages put one here. Debian and Ubuntu install the
+		# target's glibc, loader included, under /usr/<triple> with libc6-<arch>-cross, and qemu
+		# user mode reads QEMU_LD_PREFIX as the root to find the loader and the shared libc under.
 		if [ "$tuple" != "$native" ]; then
-			reason="glibc links dynamically and its loader for $tuple is not on this machine"
+			if [ -d "/usr/${tuple%%.*}/lib" ]; then
+				prefix=/usr/${tuple%%.*}
+			else
+				reason="glibc links dynamically and its loader for $tuple is not on this machine"
+			fi
 		fi
 		;;
 	esac
 
 	# Two more reasons when rucc is the compiler, and both of them are about rucc rather than about
 	# this machine. It reads the sysroot this repository produced, so a row nobody has run
-	# bin/sysroot for has nothing to compile against, and it has one back end, so every row that is
-	# not x86-64 is a row the compiler says no to itself. Naming them here rather than letting the
-	# build fail keeps a missing sysroot from reading like a miscompilation.
+	# bin/sysroot for has nothing to compile against, and it does not have a back end for every
+	# architecture in the table, so some rows are ones the compiler says no to itself. Naming them
+	# here rather than letting the build fail keeps a missing sysroot from reading like a
+	# miscompilation.
+	#
+	# Which architectures have a back end is asked of the compiler rather than written down here,
+	# because this list was x86-64 alone and stayed that way for weeks after aarch64 could run the
+	# corpus. An empty file compiled to an object is the smallest question that reaches the back
+	# end, and rucc's refusal says "no back end" when that is the reason.
 	#
 	# Before the emulator question below, because these two are true on every machine and the
 	# emulator is true on this one. A row rucc cannot compile for reads better as that than as a
@@ -132,10 +146,12 @@ for tuple in $tuples; do
 		if [ ! -d "$cache/sysroots/$tuple" ]; then
 			reason="no sysroot for $tuple has been produced, so run bin/sysroot $tuple"
 		else
-			case $tuple in
-			x86_64-*) ;;
-			*) reason="rucc has no back end for ${tuple%%-*} yet" ;;
-			esac
+			: >"$out/empty.c"
+			if "$compile" "$tuple" -c -o "$out/empty.o" "$out/empty.c" 2>"$out/probe.log"; then
+				:
+			elif grep -q 'no back end' "$out/probe.log"; then
+				reason="rucc has no back end for ${tuple%%-*} yet"
+			fi
 		fi
 	fi
 
@@ -195,7 +211,7 @@ for tuple in $tuples; do
 			fi
 
 			# shellcheck disable=SC2086
-			if ! $runner "$binary" >"$out/got" 2>&1; then
+			if ! QEMU_LD_PREFIX=$prefix $runner "$binary" >"$out/got" 2>&1; then
 				printf '%-24s %-12s %-4s exited nonzero, %s\n' "$tuple" "$name" "$level" "$how"
 				sed 's/^/    /' "$out/got" >&2
 				failed=$((failed + 1))
