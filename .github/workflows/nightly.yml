@@ -114,6 +114,54 @@ jobs:
           RUCC_CROSS_REFERENCE: gcc
         run: ./bin/run-corpus
 
+  # The corpus again, built by rucc this time rather than by the reference, and run on hardware for
+  # the runner's own architecture and under qemu for the other. The sysroots are the ones the
+  # compiler pins, fetched with `rucc --fetch` into the cache bin/rucc-cc reads, so this is the path
+  # somebody installing rucc takes rather than the one this repository takes to produce them. The
+  # glibc rows that are not the runner's run against the loader the distribution's cross packages
+  # put under /usr/<triple>, which bin/run-corpus hands to qemu.
+  #
+  # The builtins archive is built per row because a cross link ends with it, and the compiler finds
+  # it at target/<tuple>/release beside its own binary, which is where cargo xtask builtins puts it.
+  rucc-execute:
+    name: rucc's own output on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    env:
+      ROWS: x86_64-linux-musl aarch64-linux-musl x86_64-linux-gnu aarch64-linux-gnu
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
+      - name: install the cross compilers and qemu
+        run: |
+          ./toolchains/install gcc-cross
+          ./toolchains/install qemu
+      - name: build the compiler and its runtime for each row
+        working-directory: rucc
+        run: |
+          cargo build --release -p rucc --bin rucc
+          for tuple in $ROWS; do cargo xtask builtins --target="$tuple"; done
+      - name: fetch the sysroots the compiler pins
+        run: |
+          for tuple in $ROWS; do
+            RUCC_CACHE_DIR="$HOME/.cache/rucc-cross" rucc/target/release/rucc --fetch "$tuple"
+          done
+      - name: build and run with rucc
+        env:
+          RUCC: ${{ github.workspace }}/rucc/target/release/rucc
+        run: ./bin/run-corpus --cc rucc $ROWS
+
   # The kernel header tree, produced on both host architectures, and the two records held against
   # each other. That comparison is the reproducibility criterion of tamnd/rucc#619 applied to this
   # half of a sysroot, and it is the whole reason the job runs twice: the tree is the same text for
@@ -681,6 +729,7 @@ jobs:
       - drift
       - execute
       - second-opinion
+      - rucc-execute
       - real-libc
       - kernel-headers
       - kernel-headers-reproducible
