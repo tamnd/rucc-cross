@@ -17,7 +17,8 @@
 # rucc names ten files on a Windows link line, in crates/rucc-sysroot/src/link.rs. The start file is
 # crt2.o, or dllcrt2.o for a shared object, and then come libmingw32.a, libmoldname.a, libmingwex.a,
 # libmsvcrt.a, libadvapi32.a, libshell32.a, libuser32.a, libkernel32.a and librucc_builtins.a. The
-# last one the compiler builds itself and the other nine are mingw-w64's.
+# last one the compiler builds itself and the other nine are mingw-w64's. -pthread adds one more,
+# -lpthread, and that one is winpthreads, which is further down.
 #
 # The real archives rather than generated stubs, which is the question tamnd/rucc#1360 left open and
 # tamnd/rucc#1513 answers. Four of the nine are not import libraries and no stub generator can
@@ -29,9 +30,9 @@
 # installed, and it takes the published x86_64 archive from 8.4 MiB to 15.2 MiB, so there is no size
 # argument for carrying a subset.
 #
-# The compiler is the pinned zig, behind five wrapper scripts named the way mingw-w64's build expects
-# to find a cross toolchain: x86_64-w64-mingw32-gcc, -ar, -ranlib, -dlltool and -as. That is the same
-# trick bin/glibc-startfiles uses and for the same reason, which is that the recipe stays upstream's
+# The compiler is the pinned zig, behind wrapper scripts named the way mingw-w64's build expects to
+# find a cross toolchain: x86_64-w64-mingw32-gcc, -ar, -ranlib, -dlltool and -as, and -windres for
+# winpthreads. That is the same trick bin/glibc-startfiles uses and for the same reason, which is that the recipe stays upstream's
 # and only the compiler underneath it is ours. dlltool is the one that would be a problem with any
 # other compiler and is not one here, because zig ships llvm-dlltool and mingw-w64 has accepted it
 # for years.
@@ -44,10 +45,39 @@
 # whichever import library it reached first. So the build tree is cleared of empty .def files before
 # make runs rather than being trusted to be clean.
 #
-# --with-default-msvcrt=msvcrt, matching the headers. mingw-w64 v14 defaults to ucrt and the
-# compiler's link line names libmsvcrt.a, and bin/mingw-headers already configures the header tree
-# for msvcrt for that reason. Configuring the two halves differently is not a link error, it is a
-# program that disagrees with itself about printf.
+# The C runtime is whatever bin/mingw-headers configured the headers for, which is ucrt for a plain
+# target name and msvcrt for one that ends in -msvcrt, and the two functions that decide it are the
+# same two that script has. Configuring the two halves differently is not a link error, it is a
+# program that disagrees with itself about printf. The compiler's link line does not change between
+# the two, because it names libmsvcrt.a and mingw-w64-crt installs libmsvcrt.a as a copy of the
+# default runtime's import library: in a ucrt build it is the same bytes as libucrt.a and imports the
+# api-ms-win-crt-* API sets, and in a msvcrt build it is the same bytes as libmsvcrt-os.a and imports
+# msvcrt.dll. That is also what gcc relies on, since its mingw spec says -lmsvcrt whichever runtime
+# the toolchain was built for. The rest of the crt is the same bytes in both, because its Makefile
+# compiles everything with -D__MSVCRT_VERSION__=0x600 whatever the default is, so of the 2660 files in
+# the x86_64 pair only four differ: _mingw.h, libmsvcrt.a, and the two names of the winpthreads
+# archive, which is compiled with the version the headers were configured for.
+#
+# winpthreads is built after the crt, out of mingw-w64-libraries/winpthreads in the same pinned
+# release, with the same tools, and installed into the same staging prefix, which is what a
+# MinGW GCC toolchain does to get <pthread.h> and -lpthread. Static only, with --disable-shared. A
+# libpthread.dll.a in lib would be what the linker picks for -lpthread ahead of libpthread.a, and the
+# program it linked would then need libwinpthread-1.dll at run time, which is not in this sysroot and
+# not on anybody's Windows. Its install hook copies libwinpthread.a to libpthread.a, so both names
+# work, and it installs seven headers: pthread.h, pthread_compat.h, sched.h and semaphore.h are new,
+# and pthread_signal.h, pthread_time.h and pthread_unistd.h replace the one line placeholders
+# mingw-w64-headers installs under the same names, which say they are there to be overwritten by
+# exactly this. So the header tree this publishes is the one bin/mingw-headers produced plus those
+# seven, all of them upstream's bytes. The headers declare the functions without dllimport unless
+# WINPTHREADS_USE_DLLIMPORT is defined, which is right for a static library.
+#
+# winpthreads wants one tool the crt does not, which is windres, for the version resource in
+# src/version.rc. Its configure asks libtool for a resource compiler and its Makefile compiles the
+# file into the library whether the library is a DLL or not. zig has a resource compiler, but it
+# writes a .res file rather than the COFF object windres writes and libtool archives, and a version
+# resource means something only in a DLL's .rsrc section, which a static library never has: nothing
+# refers to the object, so no link ever takes it out of the archive. So the sixth wrapper is a
+# windres that writes an empty object where it was asked to write the resource.
 #
 # The import libraries this produces need lld 19 or newer to link. mingw-w64 writes a few hundred
 # aliases in its .def files with the == syntax, which says the program sees one name and the DLL is
@@ -104,11 +134,24 @@ zig() {
 # at 32 bits and stops on `pushfw or pushfl`. One machine per sysroot is what this produces, so one
 # is turned on and three are turned off and nothing is left to the host.
 mingw_row() {
-	case $1 in
+	case $(tuple_of "$1") in
 	x86_64-windows-gnu) printf 'x86_64-w64-mingw32\tx86_64-windows-gnu\tlib64\n' ;;
 	i686-windows-gnu) printf 'i686-w64-mingw32\tx86-windows-gnu\tlib32\n' ;;
 	aarch64-windows-gnu) printf 'aarch64-w64-mingw32\taarch64-windows-gnu\tlibarm64\n' ;;
 	*) die "$1 is not one of the windows-gnu targets in the targets table" ;;
+	esac
+}
+
+# The target a sysroot name is for and the runtime it is configured for, the same two functions
+# bin/mingw-headers has.
+tuple_of() {
+	printf '%s\n' "${1%-msvcrt}"
+}
+
+crt_of() {
+	case $1 in
+	*-msvcrt) printf 'msvcrt\n' ;;
+	*) printf 'ucrt\n' ;;
 	esac
 }
 
@@ -174,8 +217,9 @@ manifest_lines() {
 	)
 }
 
-# The five names mingw-w64's build looks for on a cross toolchain, written into a directory that goes
-# on the front of PATH. Everything here is the pinned zig wearing a different name.
+# The six names mingw-w64's build looks for on a cross toolchain, written into a directory that goes
+# on the front of PATH. Everything here is the pinned zig wearing a different name, and the sixth,
+# windres, is only there for winpthreads and is described at the top.
 #
 # -as is zig cc -c rather than an assembler, which is what it has to be: mingw-w64 hands .S files to
 # it and expects the preprocessor to have run. -g0 goes on the compiler for the reason
@@ -227,8 +271,26 @@ SH
 	printf '#!/bin/sh\nexec %s ranlib "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-ranlib"
 	printf '#!/bin/sh\nexec %s dlltool "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-dlltool"
 
+	{
+		printf '#!/bin/sh\nzig=%s\ntarget=%s\n' "$tool_zig" "$tool_target"
+		cat <<'SH'
+
+out=
+while [ $# -gt 0 ]; do
+	case $1 in
+	-o) out=$2; shift ;;
+	-o*) out=${1#-o} ;;
+	--output=*) out=${1#--output=} ;;
+	esac
+	shift
+done
+[ -n "$out" ] || { echo "windres: no -o, and this one only writes the empty object" >&2; exit 1; }
+printf '' | exec "$zig" cc -target "$target" -c -x c - -o "$out" -g0 -Xclang -object-file-name=
+SH
+	} >"$tool_bin/$tool_host-windres"
+
 	chmod +x "$tool_bin/$tool_host-gcc" "$tool_bin/$tool_host-as" "$tool_bin/$tool_host-ar" \
-		"$tool_bin/$tool_host-ranlib" "$tool_bin/$tool_host-dlltool"
+		"$tool_bin/$tool_host-ranlib" "$tool_bin/$tool_host-dlltool" "$tool_bin/$tool_host-windres"
 }
 
 produce() {
@@ -237,10 +299,24 @@ produce() {
 	host=$(printf '%s' "$row" | cut -f1)
 	triple=$(printf '%s' "$row" | cut -f2)
 	machine=$(printf '%s' "$row" | cut -f3)
+	tuple=$(tuple_of "$target")
+	crt=$(crt_of "$target")
 	root=$cache/sysroots/$target
 
 	[ -d "$root/include/generic" ] ||
 		die "$root has no include/generic, so run bin/mingw-headers $target first"
+	# A tree produced before the runtime choice was part of the name is a msvcrt tree under a name
+	# that now means ucrt, and building a ucrt runtime beside it is the mismatch the paragraph at the
+	# top describes. _mingw.h says which one the headers were configured for, in the `# else` arm of
+	# the block that picks `__MSVCRT_VERSION__` when nothing else has: 0xE00 for ucrt and 0x600 for
+	# msvcrt. The arm before it says 0xE00 in both, for a program that defined _UCRT itself.
+	case $crt in
+	ucrt) want_version=0xE00 ;;
+	msvcrt) want_version=0x600 ;;
+	esac
+	grep -A1 '^# else$' "$root/include/generic/_mingw.h" |
+		grep -q "^#  define __MSVCRT_VERSION__ $want_version\$" ||
+		die "the headers in $root are not configured for $crt, so run bin/mingw-headers --force $target"
 
 	if [ -f "$root/lib/libmingwex.a" ] && [ -z "$force" ]; then
 		say "$target already has a runtime in $root/lib"
@@ -268,13 +344,14 @@ produce() {
 	cp -R "$root/include/generic" "$work/install/include"
 	write_tools "$work/bin" "$z" "$triple" "$host"
 
-	say "building the mingw-w64 $version runtime for $target with zig"
+	tools_path=$work/bin:$PATH
+	say "building the mingw-w64 $version runtime for $target, $crt, with zig"
 	(
-		PATH=$work/bin:$PATH
+		PATH=$tools_path
 		export PATH
 		cd "$work/build" || exit 1
 		set -- --host="$host" --prefix="$work/install" --with-sysroot="$work/install" \
-			--with-default-msvcrt=msvcrt --disable-dependency-tracking
+			--with-default-msvcrt="$crt" --disable-dependency-tracking
 		for one in lib32 lib64 libarm32 libarm64; do
 			if [ "$one" = "$machine" ]; then
 				set -- "$@" "--enable-$one"
@@ -291,6 +368,37 @@ produce() {
 			{ tail -30 "$work/install.log" >&2; exit 1; }
 	) || die "the $target runtime did not build, and the logs are in $work"
 
+	# winpthreads, for the reasons at the top. The tests subdirectory is not built, because make with
+	# no target builds only what install needs. libtool installs a libwinpthread.la beside the
+	# archive, which names the build directory and is read by nothing but libtool, so it is removed
+	# rather than published.
+	#
+	# The headers have to be named by hand, which the crt does not need. mingw-w64-crt puts
+	# -I<sysroot>/include on its own command lines, and winpthreads has no such thing, so left alone
+	# zig cc would compile it against the mingw-w64 headers zig bundles rather than the tree this is
+	# publishing. -I rather than -isystem, because zig puts its own -isystem directories on the clang
+	# command line ahead of anything the caller passes, and -I directories are searched before all of
+	# them. zig also passes -D__MSVCRT_VERSION__=0xE00 for every windows-gnu compile, which is its own
+	# default of ucrt, so the version the headers were configured for is passed after it and wins.
+	# The crt's Makefile does the same thing for itself with 0x600.
+	say "building winpthreads for $target"
+	mkdir -p "$work/winpthreads"
+	(
+		PATH=$tools_path
+		export PATH
+		cd "$work/winpthreads" || exit 1
+		"$source/mingw-w64-libraries/winpthreads/configure" --host="$host" --prefix="$work/install" \
+			--disable-shared --enable-static --disable-dependency-tracking \
+			CPPFLAGS="-I$work/install/include -D__MSVCRT_VERSION__=$want_version" \
+			>"$work/winpthreads.configure.log" 2>&1 ||
+			{ tail -30 "$work/winpthreads.configure.log" >&2; exit 1; }
+		make -j"$jobs" >"$work/winpthreads.make.log" 2>&1 ||
+			{ tail -30 "$work/winpthreads.make.log" >&2; exit 1; }
+		make -s install >"$work/winpthreads.install.log" 2>&1 ||
+			{ tail -30 "$work/winpthreads.install.log" >&2; exit 1; }
+	) || die "winpthreads did not build for $target, and the logs are in $work"
+	rm -f "$work/install/lib/"*.la
+
 	# The nine files the compiler's link line names, checked one at a time rather than by counting
 	# what came out. A crt build that configured itself for no architecture installs an empty lib and
 	# exits 0, and a release that renames one of these is a link failure in the compiler with nothing
@@ -301,14 +409,26 @@ produce() {
 			die "the $target build installed no $one, which crates/rucc-sysroot/src/link.rs names"
 	done
 
+	# And the two things -pthread needs, plus the check that nothing asks for a DLL this sysroot
+	# does not carry, which is what a libpthread.dll.a left behind by a configure that ignored
+	# --disable-shared would do without failing anything here.
+	for one in lib/libpthread.a lib/libwinpthread.a include/pthread.h include/sched.h; do
+		[ -s "$work/install/$one" ] || die "the $target build installed no $one, which -pthread needs"
+	done
+	if [ -e "$work/install/lib/libpthread.dll.a" ] || [ -e "$work/install/lib/libwinpthread.dll.a" ]; then
+		die "the $target build installed a winpthreads import library, and nothing here ships the DLL"
+	fi
+
+	# The include directory comes back out of the staging prefix rather than out of $root, because
+	# winpthreads added its headers there.
 	mkdir -p "$root.part/include"
-	cp -R "$root/include/generic" "$root.part/include/generic"
+	cp -R "$work/install/include" "$root.part/include/generic"
 	cp -R "$work/install/lib" "$root.part/lib"
 
 	# Version 3 of the format, rewritten whole rather than appended to, because the manifest is one
 	# record of one sysroot and the lib lines belong in the same C locale order as the include ones.
 	{
-		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$tuple"
 		manifest_lines "$root.part" "mingw-w64-$version" "$url" "$licence"
 	} >"$root.part/manifest"
 

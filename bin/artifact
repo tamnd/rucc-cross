@@ -92,9 +92,12 @@ pack() {
 		root=$cache/sysroots/$target
 		[ -f "$root/manifest" ] ||
 			die "no sysroot for $target has been produced, so there is nothing to pack"
-		awk -F'\t' -v t="$target" 'NR == 2 && $1 == "target" && $2 == t { found = 1 } END { exit !found }' \
+		# A windows-gnu sysroot built for msvcrt is produced under its target's name with -msvcrt on the
+		# end, and its manifest names the target without it, because the compiler reads that line as a
+		# target tuple and the tree is for that target. bin/mingw-headers says more.
+		awk -F'\t' -v t="${target%-msvcrt}" 'NR == 2 && $1 == "target" && $2 == t { found = 1 } END { exit !found }' \
 			"$root/manifest" ||
-			die "$root/manifest does not say it is the sysroot for $target"
+			die "$root/manifest does not say it is the sysroot for ${target%-msvcrt}"
 		out=$cache/artifacts/$(archive_name "$target")
 	fi
 
