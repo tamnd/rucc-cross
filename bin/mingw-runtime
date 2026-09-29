@@ -33,9 +33,19 @@
 # The compiler is the pinned zig, behind wrapper scripts named the way mingw-w64's build expects to
 # find a cross toolchain: x86_64-w64-mingw32-gcc, -ar, -ranlib, -dlltool and -as, and -windres for
 # winpthreads. That is the same trick bin/glibc-startfiles uses and for the same reason, which is that the recipe stays upstream's
-# and only the compiler underneath it is ours. dlltool is the one that would be a problem with any
-# other compiler and is not one here, because zig ships llvm-dlltool and mingw-w64 has accepted it
-# for years.
+# and only the compiler underneath it is ours.
+#
+# dlltool is the one wrapper that is not zig. It is rucc, as `rucc --dlltool`, which reads the part of
+# GNU dlltool's command line mingw-w64-crt uses and writes the import library with rucc-stub, and
+# rucc-stub's writer is held byte for byte against llvm-dlltool over every .def file mingw-w64 checks
+# in. So the several hundred import libraries in lib are the compiler's own output rather than zig's,
+# which is the point: the one piece of this build that is a transformation of mingw-w64's text rather
+# than a compilation of its C is done by the project whose sysroot it is, and when an import library
+# is wrong the code to read is in tamnd/rucc. RUCC names the compiler and defaults to `rucc` on the
+# path, the same variable bin/rucc-cc reads, and it has to be a rucc new enough to have --dlltool,
+# which is checked before configure runs rather than discovered as a configure that decided there is
+# no dlltool. rucc's dlltool refuses --temp-prefix, as llvm-dlltool does, so configure's probe for it
+# answers no and the command lines are the ones mingw-w64 writes for llvm-dlltool.
 #
 # Two things the wrapper has to do that bin/glibc-startfiles does not. mingw-w64-crt puts -w and
 # -Wp,-w on command lines and zig 0.16 answers "unsupported preprocessor arg" to both, so the wrapper
@@ -83,7 +93,8 @@
 # aliases in its .def files with the == syntax, which says the program sees one name and the DLL is
 # asked for another, as in _crt_atexit == atexit in lib-common/msvcrt.def.in and strcmpi == _stricmp
 # in def-include/crt-aliases.def.in. llvm-dlltool records that with IMPORT_NAME_EXPORTAS, which is
-# the encoding the PE format has for it and the one llvm-mingw has shipped for years, and lld learned
+# the encoding the PE format has for it and the one llvm-mingw has shipped for years, rucc's dlltool
+# writes the same bytes, and lld learned
 # to read it in 19. lld 18 does not refuse it. It writes an import by ordinal zero instead, so the
 # program links, and then dies at startup under wine with "unimplemented function msvcrt.dll.0".
 # Ubuntu 24.04 still ships lld 18, so this is worth knowing before somebody spends an afternoon on
@@ -110,6 +121,23 @@ sha256() {
 	else
 		shasum -a 256 "$1" | cut -d' ' -f1
 	fi
+}
+
+# The rucc that writes the import libraries, as a full path, because the wrapper that runs it is
+# found on a PATH this script rewrites. --dlltool --help is the question, since a rucc from before
+# dlltool mode would read --dlltool as an unknown compiler flag and fail every import library in the
+# middle of the build instead of here.
+rucc_path() {
+	want=${RUCC:-rucc}
+	found=$(command -v "$want" 2>/dev/null) ||
+		die "$want is not on the path, and it writes the import libraries, so set RUCC to a rucc"
+	case $found in
+	/*) ;;
+	*) found=$(CDPATH='' cd -- "$(dirname -- "$found")" && pwd)/$(basename -- "$found") ;;
+	esac
+	"$found" --dlltool --help >/dev/null 2>&1 ||
+		die "$found has no --dlltool, which rucc before 0.16.0 does not have, so set RUCC to 0.16.0 or newer"
+	printf '%s\n' "$found"
 }
 
 # The pinned zig, read out of toolchains/manifest, the same way bin/glibc-startfiles reads it.
@@ -218,8 +246,9 @@ manifest_lines() {
 }
 
 # The six names mingw-w64's build looks for on a cross toolchain, written into a directory that goes
-# on the front of PATH. Everything here is the pinned zig wearing a different name, and the sixth,
-# windres, is only there for winpthreads and is described at the top.
+# on the front of PATH. Everything here but dlltool is the pinned zig wearing a different name,
+# dlltool is rucc for the reason at the top, and the sixth, windres, is only there for winpthreads
+# and is described at the top.
 #
 # -as is zig cc -c rather than an assembler, which is what it has to be: mingw-w64 hands .S files to
 # it and expects the preprocessor to have run. -g0 goes on the compiler for the reason
@@ -246,6 +275,7 @@ write_tools() {
 	tool_zig=$2
 	tool_target=$3
 	tool_host=$4
+	tool_rucc=$5
 	mkdir -p "$tool_bin"
 
 	{
@@ -269,7 +299,7 @@ SH
 		>"$tool_bin/$tool_host-as"
 	printf '#!/bin/sh\nexec %s ar "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-ar"
 	printf '#!/bin/sh\nexec %s ranlib "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-ranlib"
-	printf '#!/bin/sh\nexec %s dlltool "$@"\n' "$tool_zig" >"$tool_bin/$tool_host-dlltool"
+	printf '#!/bin/sh\nexec %s --dlltool "$@"\n' "$tool_rucc" >"$tool_bin/$tool_host-dlltool"
 
 	{
 		printf '#!/bin/sh\nzig=%s\ntarget=%s\n' "$tool_zig" "$tool_target"
@@ -329,6 +359,7 @@ produce() {
 	licence=$(awk -F'\t' '$1 == "mingw-w64" { print $3; exit }' "$pins")
 	url=$(awk -F'\t' '$1 == "mingw-w64" { print $5; exit }' "$pins")
 	z=$(zig)
+	r=$(rucc_path)
 
 	# The staging prefix is a sysroot in mingw-w64's layout rather than in ours: configure's
 	# --with-sysroot reads DIR/include and our tree splits that into include/generic. So the headers
@@ -342,10 +373,10 @@ produce() {
 	rm -rf "$work" "$root.part"
 	mkdir -p "$work/build" "$work/install"
 	cp -R "$root/include/generic" "$work/install/include"
-	write_tools "$work/bin" "$z" "$triple" "$host"
+	write_tools "$work/bin" "$z" "$triple" "$host" "$r"
 
 	tools_path=$work/bin:$PATH
-	say "building the mingw-w64 $version runtime for $target, $crt, with zig"
+	say "building the mingw-w64 $version runtime for $target, $crt, with zig and $("$r" --version | head -1)"
 	(
 		PATH=$tools_path
 		export PATH

@@ -544,9 +544,12 @@ jobs:
   # runner and an arm64 runner both reproduce the same published hash then they reproduce each other,
   # and there is nothing to upload and nothing to compare afterwards.
   #
-  # The compiler is checked out for one committed file. PROVENANCE is the release's own list of what
-  # it pins, generated from the table in crates/rucc-sysroot/src/artifact.rs, so reading it is reading
-  # the pin rather than a copy of it that could fall behind.
+  # The compiler is checked out for one committed file and one binary. PROVENANCE is the release's own
+  # list of what it pins, generated from the table in crates/rucc-sysroot/src/artifact.rs, so reading
+  # it is reading the pin rather than a copy of it that could fall behind. The binary is the dlltool
+  # bin/mingw-runtime writes the import libraries with, as `rucc --dlltool`, so the compiler's main
+  # branch is what writes them and a change to its import library writer that changes a byte shows up
+  # here as a hash that no longer matches the pin.
   #
   # Six headers installs and six crt and winpthreads builds took fourteen minutes on the x86-64 runner
   # and ten on the arm one, which is why this is nightly rather than in the gate, and nothing is
@@ -572,7 +575,12 @@ jobs:
           path: rucc
       - name: install zig
         run: ./toolchains/install zig
+      - name: build the compiler, for its dlltool
+        working-directory: rucc
+        run: cargo build --release -p rucc --bin rucc
       - name: produce the six sysroots
+        env:
+          RUCC: ${{ github.workspace }}/rucc/target/release/rucc
         run: |
           set -eu
           for target in x86_64-windows-gnu i686-windows-gnu aarch64-windows-gnu \
