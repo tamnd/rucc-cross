@@ -530,8 +530,11 @@ jobs:
       - name: build the corpus against ours and run it on theirs
         run: ./bin/glibc-image-check
 
-  # The three windows-gnu sysroots, produced from source and held against the hashes the compiler's
-  # release pins for them. Every other reproducibility job here compares two fresh runs against each
+  # The windows-gnu sysroots, produced from source and held against the hashes the compiler's
+  # release pins for them. Six of them, since each target has a ucrt sysroot under its own name and a
+  # msvcrt one with -msvcrt on the end, and the compiler pins the three ucrt ones. The msvcrt three
+  # are produced and packed anyway, so a change that breaks them breaks this job rather than the
+  # next release. Every other reproducibility job here compares two fresh runs against each
   # other, and this one compares a fresh run against a fixed published number, which is the stronger
   # question: two runs can agree on the wrong thing, and neither of them can drift away from the
   # bytes people are actually downloading without this noticing. It is the half of document 13
@@ -545,10 +548,10 @@ jobs:
   # it pins, generated from the table in crates/rucc-sysroot/src/artifact.rs, so reading it is reading
   # the pin rather than a copy of it that could fall behind.
   #
-  # Three headers installs and three crt builds are about nine minutes on a four core runner, which
-  # is why this is nightly rather than in the gate, and nothing is cached for the same reason the
-  # kernel header job caches nothing: a cache hit would skip the work and then compare a file against
-  # the hash of the run that produced it.
+  # Six headers installs and six crt and winpthreads builds took fourteen minutes on the x86-64 runner
+  # and ten on the arm one, which is why this is nightly rather than in the gate, and nothing is
+  # cached for the same reason the kernel header job caches nothing: a cache hit would skip the work
+  # and then compare a file against the hash of the run that produced it.
   mingw-sysroots:
     name: the mingw-w64 sysroots on ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -569,15 +572,18 @@ jobs:
           path: rucc
       - name: install zig
         run: ./toolchains/install zig
-      - name: produce the three sysroots
+      - name: produce the six sysroots
         run: |
           set -eu
-          for target in x86_64-windows-gnu i686-windows-gnu aarch64-windows-gnu; do
+          for target in x86_64-windows-gnu i686-windows-gnu aarch64-windows-gnu \
+            x86_64-windows-gnu-msvcrt i686-windows-gnu-msvcrt aarch64-windows-gnu-msvcrt; do
             ./bin/mingw-headers "$target"
             ./bin/mingw-runtime "$target"
           done
       - name: pack them
-        run: ./bin/artifact x86_64-windows-gnu i686-windows-gnu aarch64-windows-gnu
+        run: |
+          ./bin/artifact x86_64-windows-gnu i686-windows-gnu aarch64-windows-gnu \
+            x86_64-windows-gnu-msvcrt i686-windows-gnu-msvcrt aarch64-windows-gnu-msvcrt
       - name: hold them against what the compiler pins
         run: |
           ./bin/artifact --against rucc/PROVENANCE \

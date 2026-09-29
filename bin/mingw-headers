@@ -30,11 +30,23 @@
 # splitting is the day this has to stop publishing one tree, and four seconds an install is a cheap
 # way to be told.
 #
-# The one thing that is not left at the release default is the C runtime. mingw-w64 v14 defaults to
-# ucrt, and the compiler's own Windows link line names libmsvcrt.a, so the headers are configured
-# with --with-default-msvcrt=msvcrt to match it. A tree configured for one runtime and linked against
-# the other disagrees about `printf` and about every wide character function, and the disagreement is
-# a macro in _mingw.h rather than anything a linker would catch.
+# The C runtime is the one choice there is to make, and there are two answers to it, so each target
+# comes in two sysroots. The plain name is configured with --with-default-msvcrt=ucrt, which is the
+# release default and what MSYS2's UCRT64 environment, current MinGW GCC builds and llvm-mingw all
+# ship: the program imports the api-ms-win-crt-* API sets and gets a C library with a conforming
+# printf. The name with -msvcrt on the end, x86_64-windows-gnu-msvcrt and so on, is configured with
+# --with-default-msvcrt=msvcrt and imports msvcrt.dll, for somebody who has to run on a Windows older
+# than 10 without the UCRT redistributable. Every sysroot this published before tamnd/rucc#2069 was
+# the msvcrt one. A tree configured for one runtime and linked against the other disagrees about
+# `printf`, `FILE` and every wide character function, and the disagreement is a macro in _mingw.h
+# rather than anything a linker would catch, so bin/mingw-runtime builds the runtime with the same
+# answer the headers were given, and the compiler's link line names libmsvcrt.a, which mingw-w64
+# installs as a copy of whichever runtime the build defaults to.
+#
+# The variant is a name for the sysroot rather than for the target. Both trees are for
+# x86_64-windows-gnu, the manifest inside each says so, and the compiler reads that line as a target
+# tuple, so the -msvcrt part lives only in the directory the tree is produced into and in the name of
+# the archive bin/artifact packs it into.
 #
 # What is missing is the import libraries, which are the other half of the same problem and are named
 # here so that nobody reads this and thinks a Windows sysroot is done. mingw-w64 ships several
@@ -72,11 +84,25 @@ all="x86_64-w64-mingw32 i686-w64-mingw32 aarch64-w64-mingw32"
 # windows-gnu rows of the targets table, and a target that is not one of them is not something this
 # produces: the msvc rows are behind the microsoft-sdk wall and have no mingw tree to be published.
 mingw_host() {
-	case $1 in
+	case $(tuple_of "$1") in
 	x86_64-windows-gnu) printf 'x86_64-w64-mingw32\n' ;;
 	i686-windows-gnu) printf 'i686-w64-mingw32\n' ;;
 	aarch64-windows-gnu) printf 'aarch64-w64-mingw32\n' ;;
 	*) die "$1 is not one of the windows-gnu targets in the targets table" ;;
+	esac
+}
+
+# The target a sysroot name is for, which is the name without its -msvcrt, and the runtime it is
+# configured for, which is msvcrt when that suffix is there and ucrt when it is not. The same two
+# functions are in bin/mingw-runtime, because the two halves have to agree on both.
+tuple_of() {
+	printf '%s\n' "${1%-msvcrt}"
+}
+
+crt_of() {
+	case $1 in
+	*-msvcrt) printf 'msvcrt\n' ;;
+	*) printf 'ucrt\n' ;;
 	esac
 }
 
@@ -121,8 +147,8 @@ mingw_source() {
 # mingw-w64 v14.0.0 release and looking up each installed file's hash in that set says that of the
 # 1702 installed headers, 1701 are upstream's byte for byte and one is not. The one is _mingw.h,
 # which configure generates from _mingw.h.in, and the two lines it substitutes are the two answers
-# this script chose: `__MSVCRT_VERSION__ 0x600` for the msvcrt runtime and `_WIN32_WINNT 0xa00` for
-# the Windows 10 API level that the release defaults to.
+# this script chose: `__MSVCRT_VERSION__` 0xE00 for ucrt or 0x600 for msvcrt, and `_WIN32_WINNT
+# 0xa00` for the Windows 10 API level that the release defaults to.
 #
 # The lib rule is for the half that is not here yet. Whatever ends up in it, generated stubs or
 # mingw's own archives, will be produced by a toolchain rather than unpacked from the release.
@@ -159,6 +185,8 @@ manifest_lines() {
 produce() {
 	target=$1
 	host=$(mingw_host "$target")
+	tuple=$(tuple_of "$target")
+	crt=$(crt_of "$target")
 	root=$cache/sysroots/$target
 
 	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
@@ -180,12 +208,12 @@ produce() {
 	rm -rf "$work" "$root.part"
 	mkdir -p "$work"
 	for one in $all; do
-		say "installing the $one headers of mingw-w64 $version"
+		say "installing the $one headers of mingw-w64 $version for $crt"
 		mkdir -p "$work/build-$one"
 		(
 			cd "$work/build-$one" || exit 1
 			"$source/mingw-w64-headers/configure" --host="$one" --prefix="$work/install-$one" \
-				--with-default-msvcrt=msvcrt >"$work/$one.configure.log" 2>&1 ||
+				--with-default-msvcrt="$crt" >"$work/$one.configure.log" 2>&1 ||
 				{ tail -20 "$work/$one.configure.log" >&2; exit 1; }
 			make -s install >"$work/$one.make.log" 2>&1 ||
 				{ tail -20 "$work/$one.make.log" >&2; exit 1; }
@@ -218,7 +246,7 @@ produce() {
 	# omission: that line names the Linux release a sysroot was produced beside and Windows has no
 	# system call headers of anybody's to be produced beside.
 	{
-		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$tuple"
 		manifest_lines "$root.part" "mingw-w64-$version" "$url" "$licence"
 	} >"$root.part/manifest"
 
