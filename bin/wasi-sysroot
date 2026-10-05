@@ -1,0 +1,180 @@
+#!/bin/sh
+# Produce a WASI sysroot for a wasm target, laid out the way rucc-sysroot reads one.
+#
+# usage: bin/wasi-sysroot <target>...
+#        bin/wasi-sysroot --force <target>...
+#        bin/wasi-sysroot --check <manifest> <manifest>
+#
+# The targets are wasm32-wasip1, wasm32-wasip2 and wasm32-wasip3, which are the WASI rows of the compiler. The C library of all three is wasi-libc, and rucc does not build it. It uses the sysroot that wasi-sdk publishes, which is what clang users link against, so a rucc object and a clang object link against the same bytes. Document 10 of the WebAssembly notes in the compiler says why, and tamnd/rucc#2863 is the step that needs this.
+#
+# What it does, for each target: fetch the pinned wasi-sysroot from sysroots/manifest and verify its hash, take the C part of the target's preview out of it, and lay that out as include/generic and lib with a version 3 manifest beside it.
+#
+# The upstream archive is 119 MB, and most of it is not C. It holds one tree for each of wasm32-wasip1, wasm32-wasip1-threads, wasm32-wasip2 and wasm32-wasip3, and each tree has libc++ headers and libraries for two exception models. The C part of one preview is about 1.3 MB with gzip. So the compiler pins one archive per target that this script makes, and the upstream hash stays here as the input that every one of them is checked against.
+#
+# The C part is every header in include/<target> except the eh and noeh directories, which hold libc++ and libunwind, and every static archive and start file at the top of lib/<target>. The shared objects are left out, because a wasm module that rucc links is static, and so are the eh, noeh and llvm-lto directories, which are C++ and LLVM bitcode. Every file is upstream's byte for byte, so every line of the manifest is bundled.
+#
+# There is no include/<arch>. The three previews are three trees, but each one is for one architecture, so the split of section 8.3 has nothing to put on the architecture side. The compiler reads a WASI sysroot as one include/generic for the same reason it reads a Windows one that way.
+#
+# The licence is mit. wasi-libc is the musl C library with the system interface replaced, musl is MIT, and the code wasi-libc adds is offered under Apache-2.0 WITH LLVM-exception, Apache-2.0 or MIT, at the choice of the user. No header in the C part carries a notice of another licence.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so a produced sysroot survives a branch switch. Producing one that is already there is a no-op unless --force is given.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/manifest
+force=
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "wasi-sysroot: $*"; exit 1; }
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The targets this produces. A target that is not one of them is refused rather than guessed at: wasm32-wasip1-threads is in the upstream archive and is not a row of the compiler, and wasm32-none has no C library.
+check_target() {
+	case $1 in
+	wasm32-wasip1 | wasm32-wasip2 | wasm32-wasip3) ;;
+	*) die "$1 is not a WASI row of the compiler, which are wasm32-wasip1, wasm32-wasip2 and wasm32-wasip3" ;;
+	esac
+}
+
+# Fetch and unpack the pinned wasi-sysroot once, shared by every target, and print where it went. The same shape bin/mingw-headers uses, and the same rule: nothing is fetched without a hash and nothing is fetched from a URL that is not on a line of sysroots/manifest.
+wasi_source() {
+	line=$(awk -F'\t' '$1 == "wasi-sysroot" { print; exit }' "$pins")
+	[ -n "$line" ] || die "sysroots/manifest has no wasi-sysroot line"
+
+	version=$(printf '%s' "$line" | cut -f2)
+	want=$(printf '%s' "$line" | cut -f4)
+	url=$(printf '%s' "$line" | cut -f5)
+	into=$cache/wasi-sysroot-$version
+
+	if [ ! -d "$into" ]; then
+		mkdir -p "$cache"
+		archive=$cache/$(basename "$url")
+		if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+			say "fetching $url"
+			curl -fsSL --retry 3 -o "$archive.part" "$url"
+			mv "$archive.part" "$archive"
+		fi
+		got=$(sha256 "$archive")
+		[ "$got" = "$want" ] || {
+			rm -f "$archive"
+			die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
+		}
+		rm -rf "$into.part"
+		mkdir -p "$into.part"
+		tar -xzf "$archive" -C "$into.part" --strip-components=1
+		[ -d "$into.part/include" ] && [ -d "$into.part/lib" ] ||
+			die "$(basename "$url") has no include and lib under its top directory"
+		mv "$into.part" "$into"
+	fi
+	printf '%s\n' "$into"
+}
+
+# Everything under a directory, hashed, as manifest lines. Sorted in the C locale because that is the order rucc-sysroot renders a manifest in. The names are prefixed for the reason bin/mingw-headers gives.
+manifest_lines() {
+	walk_root=$1
+	walk_source=$2
+	walk_url=$3
+	walk_licence=$4
+	(
+		cd "$walk_root" || exit 1
+		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
+			printf '%s\t%s\t%s\t%s\t%s\tbundled\n' \
+				"$walk_file" "$walk_source" "$walk_url" "$(sha256 "$walk_file")" "$walk_licence"
+		done
+	)
+}
+
+produce() {
+	target=$1
+	check_target "$target"
+	root=$cache/sysroots/$target
+
+	if [ -f "$root/manifest" ] && [ -z "$force" ]; then
+		say "$target is already produced in $root"
+		printf '%s\n' "$root/manifest"
+		return 0
+	fi
+
+	source=$(wasi_source)
+	version=$(basename "$source" | sed 's/^wasi-sysroot-//')
+	licence=$(awk -F'\t' '$1 == "wasi-sysroot" { print $3; exit }' "$pins")
+	url=$(awk -F'\t' '$1 == "wasi-sysroot" { print $5; exit }' "$pins")
+	headers=$source/include/$target
+	libs=$source/lib/$target
+	[ -f "$headers/stdio.h" ] || die "the wasi-sysroot has no $target headers"
+	[ -f "$libs/libc.a" ] || die "the wasi-sysroot has no $target libc.a"
+
+	rm -rf "$root.part"
+	mkdir -p "$root.part/include/generic" "$root.part/lib"
+
+	# The headers without the two C++ directories. The copy is by tar so that the directory structure comes with the files and nothing else does.
+	(cd "$headers" && tar -cf - --exclude ./eh --exclude ./noeh .) |
+		(cd "$root.part/include/generic" && tar -xf -)
+	[ ! -e "$root.part/include/generic/eh" ] && [ ! -e "$root.part/include/generic/noeh" ] ||
+		die "the C++ headers of $target were copied, so the tar on this machine ignored --exclude"
+
+	# The static archives and the start files at the top of lib, and nothing under it.
+	found=
+	for file in "$libs"/*.a "$libs"/*.o; do
+		[ -f "$file" ] || continue
+		cp "$file" "$root.part/lib/"
+		found=yes
+	done
+	[ -n "$found" ] || die "the wasi-sysroot has no static libraries for $target"
+	for start in crt1.o crt1-command.o crt1-reactor.o; do
+		[ -f "$root.part/lib/$start" ] || die "the wasi-sysroot has no $start for $target"
+	done
+
+	{
+		printf 'rucc sysroot manifest 3\ntarget\t%s\n' "$target"
+		manifest_lines "$root.part" "wasi-sysroot-$version" "$url" "$licence"
+	} >"$root.part/manifest"
+
+	rm -rf "$root"
+	mv "$root.part" "$root"
+	say "$target is in $root, $(grep -c '' "$root/manifest") manifest lines, $(du -sk "$root" | cut -f1)K"
+	printf '%s\n' "$root/manifest"
+}
+
+# Compare two manifests and say what differs, which is the reproducibility check.
+check() {
+	a=$1
+	b=$2
+	[ -f "$a" ] || die "$a is not a file"
+	[ -f "$b" ] || die "$b is not a file"
+	if cmp -s "$a" "$b"; then
+		say "the two manifests are identical, $(grep -c '' "$a") lines"
+		return 0
+	fi
+	say "the two manifests differ:"
+	diff -u "$a" "$b" >&2 || true
+	return 1
+}
+
+[ $# -gt 0 ] || die "usage: bin/wasi-sysroot <target>... or bin/wasi-sysroot --check <manifest> <manifest>"
+
+case $1 in
+--check)
+	[ $# -eq 3 ] || die "usage: bin/wasi-sysroot --check <manifest> <manifest>"
+	check "$2" "$3"
+	;;
+--force)
+	force=yes
+	shift
+	[ $# -gt 0 ] || die "usage: bin/wasi-sysroot --force <target>..."
+	for target in "$@"; do produce "$target"; done
+	;;
+-*) die "unknown option $1" ;;
+*)
+	for target in "$@"; do produce "$target"; done
+	;;
+esac

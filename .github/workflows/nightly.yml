@@ -691,6 +691,35 @@ jobs:
             aarch64-linux-gnu armv7-linux-gnueabihf riscv64-linux-gnu powerpc64le-linux-gnu \
             s390x-linux-gnu loongarch64-linux-gnu
 
+  # The three WASI sysroots the compiler pins, taken out of the pinned wasi-sysroot of wasi-sdk 34 and
+  # held against those pins the way the jobs above hold theirs. Nothing is built, so the job is a
+  # download, a copy and a pack, and the two host architectures are there because a pack that
+  # depended on the host would be a pin that depended on who ran it.
+  wasi-sysroots:
+    name: the WASI sysroots on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux x86-64
+            os: ubuntu-24.04
+          - name: linux aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          path: rucc
+      - name: produce the three sysroots
+        run: ./bin/wasi-sysroot wasm32-wasip1 wasm32-wasip2 wasm32-wasip3
+      - name: pack them
+        run: ./bin/artifact wasm32-wasip1 wasm32-wasip2 wasm32-wasip3
+      - name: hold them against what the compiler pins
+        run: ./bin/artifact --against rucc/PROVENANCE wasm32-wasip1 wasm32-wasip2 wasm32-wasip3
+
   # The compiler's glibc stubs against the real glibc on the runner, which is the comparison
   # spec/cross-compile/09-libc-stubs.md section 9.8 calls the highest value test in that document. The
   # description comes from bin/abilist, which fetches a pinned glibc source and takes the abilist out
@@ -759,6 +788,7 @@ jobs:
       - mingw-sysroots
       - linux-sysroots
       - glibc-sysroots
+      - wasi-sysroots
     runs-on: ubuntu-24.04
     steps:
       # `drift` and `second-opinion` are allowed to fail without failing the run. A new zig release
@@ -776,7 +806,7 @@ jobs:
       # releases counts twice, once for the merge refusing its own output and once for the two hosts
       # disagreeing about the bytes. Running that tree on the distributions counts hardest of the
       # header jobs, because it is the only one whose failure is a binary that does not start on
-      # somebody's machine rather than two files that differ. The windows-gnu, musl and glibc
+      # somebody's machine rather than two files that differ. The windows-gnu, musl, glibc and WASI
       # sysroots are the strongest of the lot: a produced archive that no longer hashes to what the
       # compiler pins means either the recipe moved or the published file is not what the recipe
       # makes, and both of those are somebody here finding out before a user does.
@@ -797,6 +827,7 @@ jobs:
           || needs.mingw-sysroots.result != 'success'
           || needs.linux-sysroots.result != 'success'
           || needs.glibc-sysroots.result != 'success'
+          || needs.wasi-sysroots.result != 'success'
         run: exit 1
       - name: pass
         run: echo "nightly is clean"
