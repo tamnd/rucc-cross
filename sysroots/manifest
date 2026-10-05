@@ -54,6 +54,8 @@
 # `bin/mingw-headers` runs `mingw-w64-headers/configure && make install` out of this tarball once per
 # Windows architecture and publishes one of the three trees, which are identical.
 #
+# wasi-sysroot 34.0 is the sysroot of wasi-sdk 34, which has wasi-libc for every WASI preview. It is the one row here that is not a libc source: rucc does not build wasi-libc, and `bin/wasi-sysroot` takes the C part of one preview out of this archive rather than building anything. The release is the newest one, of 25 August 2026, and it is what clang 23 users link against, so a rucc object and a clang object meet the same bytes. The licence is the one wasi-libc offers, which is MIT for its musl part and a choice that includes MIT for the rest.
+#
 # Nothing here is fetched without a hash and nothing is fetched from a URL that is not on one of
 # these lines. `toolchains/record-hash musl 1.2.5 - <url>` downloads once and prints a line whose
 # fourth column is the hash, which is the column that belongs here, so nobody types one from memory.
@@ -69,3 +71,4 @@ glibc	2.31	lgpl	9246fe44f68feeec8c666bb87973d590ce0137cca145df014c72ec95be9ffd17
 glibc	2.28	lgpl	b1900051afad76f7a4f73e71413df4826dce085ef8ddb785a945b66d7d513082	https://ftp.gnu.org/gnu/glibc/glibc-2.28.tar.xz
 linux	6.19	gpl-2.0-with-linux-syscall-note	303079a8250b8f381f82b03f90463d12ac98d4f6b149b761ea75af1323521357	https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.19.tar.xz
 mingw-w64	14.0.0	mingw-permissive	6eaf921d9eb987d3820b364ea9775bc19b965ec81490b6fdd716526c28e1995c	https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v14.0.0.tar.bz2
+wasi-sysroot	34.0	mit	9d813544eeebe38b7b8f2244ed591de46b6db812c6dd1a257ff9f0d2a905a2be	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sysroot-34.0.tar.gz

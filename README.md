@@ -45,6 +45,7 @@ bin/glibc-distribution          hold those headers against a real distribution's
 bin/glibc-versions              record which releases changed which header, for the merge ahead
 bin/glibc-startfiles            build glibc's start files and libc_nonshared.a, then link and run them
 bin/abilist x86_64              extract glibc's own symbol list, for the compiler's stub comparison
+bin/wasi-sysroot wasm32-wasip1  take the C part of one WASI preview out of the pinned wasi-sysroot
 bin/sysroot --check a b         compare two manifests, which is the reproducibility check
 bin/lint                        the house rules
 ```
