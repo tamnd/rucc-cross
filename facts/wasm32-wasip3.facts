@@ -1,4 +1,4 @@
-# wasm32-none
+# wasm32-wasip3
 # reference: wasi-sdk 34.0
 biggest_alignment=16
 char_bit=8

@@ -3,9 +3,9 @@
 #
 # usage: toolchains/install <tool>...
 #
-# Tools: zig, qemu, gcc-cross, gcc-cross-x86. The first is a hash pinned tarball from
-# toolchains/manifest and the others come from the platform's package manager, for the reason written
-# at the top of that file. Running this twice is cheap, because a toolchain that is already unpacked
+# Tools: zig, wasi-sdk, qemu, gcc-cross, gcc-cross-x86. The first two are hash pinned tarballs from
+# toolchains/manifest and the others come from the platform's package manager, for the reason
+# written at the top of that file. Running this twice is cheap, because a toolchain that is already unpacked
 # is left alone.
 #
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. It is outside the
@@ -80,6 +80,7 @@ install_pinned() {
 	mkdir -p "$into.part"
 	case $url in
 	*.tar.xz) tar -xJf "$archive" -C "$into.part" --strip-components=1 ;;
+	*.tar.gz) tar -xzf "$archive" -C "$into.part" --strip-components=1 ;;
 	*.tar.bz2) tar -xjf "$archive" -C "$into.part" --strip-components=1 ;;
 	*.zip)
 		unzip -q "$archive" -d "$into.part"
@@ -167,7 +168,7 @@ install_packaged() {
 
 for tool in "$@"; do
 	case $tool in
-	zig) install_pinned zig ;;
+	zig | wasi-sdk) install_pinned "$tool" ;;
 	qemu | gcc-cross | gcc-cross-x86 | gcc-cross-corpus) install_packaged "$tool" ;;
 	*) die "unknown tool $tool, and toolchains/manifest lists what there is" ;;
 	esac

@@ -23,6 +23,12 @@
 # the version that was actually used in every facts file, so a result that changes because the
 # toolchain changed is visible rather than mysterious. Pinned tarballs for both are wanted, and
 # the way in is `toolchains/record-hash`.
+#
+# wasi-sdk is the reference for the wasm rows, because zig has one spelling for the three WASI
+# previews and the compiler repository holds its wasm macros against clang 23 from wasi-sdk 34. The
+# hashes are the digests that GitHub publishes for the wasi-sdk-34 release assets, and the arm64
+# macOS one was checked against a download. wasi-sdk spells an aarch64 host arm64, and the host
+# column here is still the zig spelling.
 
 zig	0.16.0	x86_64-linux	70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00	https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
 zig	0.16.0	aarch64-linux	ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17	https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz
@@ -30,3 +36,7 @@ zig	0.16.0	x86_64-macos	0387557ed1877bc6a2e1802c8391953baddba76081876301c522f529
 zig	0.16.0	aarch64-macos	b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489	https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz
 zig	0.16.0	x86_64-windows	68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e	https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip
 zig	0.16.0	aarch64-windows	aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef	https://ziglang.org/download/0.16.0/zig-aarch64-windows-0.16.0.zip
+wasi-sdk	34.0	x86_64-linux	b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz
+wasi-sdk	34.0	aarch64-linux	f7e243dff54d60bcc576e94d6166b69f410f2500ae4a9ceef34315be10e77971	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-arm64-linux.tar.gz
+wasi-sdk	34.0	x86_64-macos	87d27fa8adc68dee59bfbf2e22a6d34ef717c34d6bf1d8af2a56fc929d9ce0eb	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-macos.tar.gz
+wasi-sdk	34.0	aarch64-macos	9c59398106b417f8f14913380fdf0097a8cc0ff4af9eb3ce0065a859e88d49e9	https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-arm64-macos.tar.gz
