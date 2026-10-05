@@ -11,11 +11,12 @@
 # The zig column was not written from the documentation. Every entry in it was checked by running
 # `zig cc -target <spelling> -dM -E -x c /dev/null` against zig 0.16.0, which is the version pinned
 # in toolchains/manifest, and the dashes are the ones that failed. Three of them are worth knowing
-# about: zig lists illumos as an operating system and `zig cc` cannot target it, because there is
-# no libc for it in the distribution; wasm32-wasip1 and later are spelled `wasm32-wasi` with no
+# about: zig lists illumos as an operating system and `zig cc` cannot target it, because there is no
+# libc for it in the distribution; wasm32-wasip1 and later are spelled `wasm32-wasi` with no
 # version, so the three rucc rows collapse onto one zig row and rucc's finer distinction has no
-# reference to compare against; and arm64ec has no spelling at all, which agrees with
-# spec/cross-compile/06-abis.md section 6.8 declining it.
+# reference to compare against in zig, which is why bin/facts takes clang from wasi-sdk for them;
+# and arm64ec has no spelling at all, which agrees with spec/cross-compile/06-abis.md section 6.8
+# declining it.
 #
 # The gcc column is the Debian and Ubuntu cross compiler prefix, so `aarch64-linux-gnu` means
 # `aarch64-linux-gnu-gcc` from `gcc-aarch64-linux-gnu`. It is much sparser than the zig column and
@@ -27,8 +28,8 @@
 # Mach-O or a PE needs a different answer. spec/cross-compile/14-testing.md section 14.6 is the
 # rule for reading a result that came from an emulator rather than from hardware.
 #
-# x32 is the one Linux row with a dash, and it used to say qemu-x86_64 until something actually tried
-# to run an x32 binary. qemu 8.2.2 installs fifty emulators and none of them is an x32 one, so
+# x32 is the one Linux row with a dash, and it used to say qemu-x86_64 until something actually
+# tried to run an x32 binary. qemu 8.2.2 installs fifty emulators and none of them is an x32 one, so
 # qemu-x86_64 gets the file and answers "Invalid ELF image for this architecture", and the kernel
 # cannot take it either: Ubuntu 24.04 ships CONFIG_X86_X32_ABI unset, so running it directly is an
 # exec format error. The ABI is still worth compiling and linking for, which is what `bin/abilist`
@@ -74,5 +75,6 @@ i686-none	x86-freestanding-none	-	-
 armv7-none-eabi	arm-freestanding-eabi	arm-none-eabi	-
 armv7m-none-eabi	thumb-freestanding-eabi	arm-none-eabi	-
 wasm32-wasip1	wasm32-wasi	-	-
+wasm32-wasip2	-	-	-
 wasm32-wasip3	-	-	-
 wasm32-none	wasm32-freestanding	-	-

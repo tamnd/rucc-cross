@@ -35,7 +35,7 @@ jobs:
       - name: bin/lint
         run: ./bin/lint
 
-  # The layout corpus for every one of the forty two targets, and the recorded facts for each of
+  # The layout corpus for every one of the forty three targets, and the recorded facts for each of
   # them. Neither needs an emulator, so this is the job that says something about the whole table
   # rather than about the rows with a machine behind them.
   layout:
@@ -60,8 +60,9 @@ jobs:
         with:
           path: ~/.cache/rucc-cross
           key: toolchains-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest') }}
-      - name: install zig
-        run: ./toolchains/install zig
+      # wasi-sdk is the reference for the facts of the wasm rows, and bin/reference-cc says why.
+      - name: install zig and wasi-sdk
+        run: ./toolchains/install zig wasi-sdk
       - name: the recorded facts still match the reference
         run: ./bin/facts --check
       - name: the layout corpus compiles for every target

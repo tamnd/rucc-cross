@@ -1,5 +1,5 @@
 # wasm32-wasip1
-# reference: zig 0.16.0
+# reference: wasi-sdk 34.0
 biggest_alignment=16
 char_bit=8
 char_signed=yes

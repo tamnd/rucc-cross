@@ -28,6 +28,7 @@ Three things, and they are separable.
 
 ```
 toolchains/install zig          fetch the pinned reference compiler
+toolchains/install wasi-sdk     fetch the pinned reference compiler for the wasm rows
 bin/facts --all                 what the reference says about every target's scalar types
 bin/facts --check               fail if anything in facts/ has drifted
 bin/compile-corpus              compile the layout corpus for all forty two targets

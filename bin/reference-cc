@@ -9,6 +9,11 @@
 # instead, for the rows where one exists, which is the comparison that matters when the two
 # disagree and somebody has to decide which is right.
 #
+# Set RUCC_CROSS_REFERENCE=wasi-sdk to use clang from wasi-sdk for a wasm row. zig spells the three
+# WASI previews as one target, so it cannot tell them apart, and the compiler repository holds its
+# wasm macros against clang 23 from wasi-sdk 34. bin/facts uses it for the wasm rows for that
+# reason.
+#
 # Nothing here knows what rucc does. This side of the comparison is deliberately independent, so
 # that a bug in rucc's target table cannot quietly become the expected answer.
 
@@ -43,8 +48,8 @@ gcc)
 	# only $prefix-gcc-<n> for the ones that do not, which today is loongarch64 and tomorrow is
 	# whichever port is newest. Take the plain name when there is one and the highest numbered
 	# otherwise, rather than leaving a row of the table with no second opinion over a naming
-	# convention. The list is walked downwards and stops at the first hit, so a machine holding two of
-	# them gets the newer one.
+	# convention. The list is walked downwards and stops at the first hit, so a machine holding two
+	# of them gets the newer one.
 	cc=
 	for suffix in "" -20 -19 -18 -17 -16 -15 -14 -13 -12 -11 -10 -9; do
 		if command -v "$prefix-gcc$suffix" >/dev/null 2>&1; then
@@ -55,7 +60,21 @@ gcc)
 	[ -n "$cc" ] || die "$prefix-gcc is not on the path, so run toolchains/install gcc-cross"
 	exec "$cc" "$@"
 	;;
+wasi-sdk)
+	# clang spells the WASI rows as rucc does, and wasm32-none as wasm32-unknown-unknown. The
+	# sysroot is the wasi-sysroot in the same release, which is the one bin/wasi-sysroot takes the C
+	# part of.
+	case $tuple in
+	wasm32-wasip1 | wasm32-wasip2 | wasm32-wasip3) spelling=$tuple ;;
+	wasm32-none) spelling=wasm32-unknown-unknown ;;
+	*) die "wasi-sdk has no spelling for $tuple, because it is not a wasm row" ;;
+	esac
+	version=$(awk -F'\t' '$1 == "wasi-sdk" { print $2; exit }' "$here/toolchains/manifest")
+	sdk=$cache/wasi-sdk-$version
+	[ -x "$sdk/bin/clang" ] || die "wasi-sdk $version is not installed, so run toolchains/install wasi-sdk"
+	exec "$sdk/bin/clang" --target="$spelling" --sysroot="$sdk/share/wasi-sysroot" "$@"
+	;;
 *)
-	die "RUCC_CROSS_REFERENCE is ${RUCC_CROSS_REFERENCE}, and it has to be zig or gcc"
+	die "RUCC_CROSS_REFERENCE is ${RUCC_CROSS_REFERENCE}, and it has to be zig, gcc or wasi-sdk"
 	;;
 esac
