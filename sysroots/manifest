@@ -8,10 +8,12 @@
 # copied into every line of every produced manifest and a second spelling of the same fact is a
 # second thing to get wrong.
 #
-# musl 1.2.5 is the version Zig 0.16 carries, which is recorded in
-# spec/cross-compile/01-research-2026.md in the compiler repository. Pinning the same version is
-# what makes the comparison between the two mean anything: a difference between our sysroot and
-# zig's is then a difference in how it was built rather than in what was built.
+# musl 1.2.6 is pinned because it fixes CVE-2025-26519 in iconv and adds posix_getdents and
+# renameat2. The pin used to be 1.2.5, the version Zig 0.16 carries, so that a difference between our
+# sysroot and zig's was a difference in how it was built and not in what was built. A comparison with
+# zig's tree now also shows the changes from 1.2.5 to 1.2.6. The compiler builds musl 1.2.6 with
+# itself and runs libc-test on it, and the result is the same set of failures as the build with gcc.
+# That is tamnd/rucc#3281.
 #
 # There are several glibc rows, and the order matters: the first one is the pin, and every later one
 # is a release fetched by version for a comparison. `bin/glibc-headers` and `bin/abilist` take the
@@ -57,10 +59,10 @@
 # wasi-sysroot 34.0 is the sysroot of wasi-sdk 34, which has wasi-libc for every WASI preview. It is the one row here that is not a libc source: rucc does not build wasi-libc, and `bin/wasi-sysroot` takes the C part of one preview out of this archive rather than building anything. The release is the newest one, of 25 August 2026, and it is what clang 23 users link against, so a rucc object and a clang object meet the same bytes. The licence is the one wasi-libc offers, which is MIT for its musl part and a choice that includes MIT for the rest.
 #
 # Nothing here is fetched without a hash and nothing is fetched from a URL that is not on one of
-# these lines. `toolchains/record-hash musl 1.2.5 - <url>` downloads once and prints a line whose
+# these lines. `toolchains/record-hash musl 1.2.6 - <url>` downloads once and prints a line whose
 # fourth column is the hash, which is the column that belongs here, so nobody types one from memory.
 
-musl	1.2.5	mit	a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4	https://musl.libc.org/releases/musl-1.2.5.tar.gz
+musl	1.2.6	mit	d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a	https://musl.libc.org/releases/musl-1.2.6.tar.gz
 glibc	2.44	lgpl	37f600f2bef3c5e8300147059568b2a2e40a7ad6ccc65ce942556d49429cc667	https://ftp.gnu.org/gnu/glibc/glibc-2.44.tar.xz
 glibc	2.41	lgpl	a5a26b22f545d6b7d7b3dd828e11e428f24f4fac43c934fb071b6a7d0828e901	https://ftp.gnu.org/gnu/glibc/glibc-2.41.tar.xz
 glibc	2.39	lgpl	f77bd47cf8170c57365ae7bf86696c118adb3b120d3259c64c502d3dc1e2d926	https://ftp.gnu.org/gnu/glibc/glibc-2.39.tar.xz
