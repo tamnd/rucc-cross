@@ -132,9 +132,9 @@ kernel_release() {
 # `Provenance` in rucc-sysroot applies. Bundled when they can, generated when this toolchain wrote
 # them.
 #
-# Measured rather than assumed, by hashing every file in the musl 1.2.5 release and looking up each
+# Measured rather than assumed, by hashing every file in the musl 1.2.6 release and looking up each
 # installed file's hash in that set. The answer for musl is that the library files are ours, because
-# a compiler produced them, and all 219 headers but two are upstream's byte for byte. The two are
+# a compiler produced them, and all 217 headers but two are upstream's byte for byte. The two are
 # bits/alltypes.h and bits/syscall.h, which musl's own build generates with sed from the .h.in files
 # of the architecture it is building for, so the bytes are in no release and the file is generated
 # the same way a merged glibc header tree is.
