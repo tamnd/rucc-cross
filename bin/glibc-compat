@@ -1,0 +1,171 @@
+#!/bin/sh
+# List the glibc symbols that a new link cannot bind to, for the compiler's glibc stubs.
+#
+# usage: bin/glibc-compat > compat.txt
+#
+# glibc keeps some symbols only for programs that were linked against them in the past. Such a
+# symbol has a definition at a version node, as `xdr_opaque@GLIBC_2.2.5`, but no default definition,
+# so a new link that names it fails. An abilist cannot show this. The line for such a symbol has the
+# same three fields as the line for any other symbol. The compiler writes its stubs from the
+# abilists, so without this list its stubs let a program link that a real glibc refuses. That is
+# tamnd/rucc#920.
+#
+# The list comes from real libraries. For each release and architecture in sysroots/glibc-compat,
+# this gets the Debian libc6 package from snapshot.debian.org, checks its hash, and reads libc, libm,
+# librt and the loader with readelf. A name is compat only in a release when the library defines it
+# and has no default definition of it. The output gives, for each name, the first release where it
+# is compat only. A target at that release or a later one gets a stub with no default definition of
+# the name.
+#
+# A release that Debian did not build is not measured. When a name changes in such a gap, the list
+# gives the first measured release after the change. A target in the gap then still gets the default
+# definition. That is the permissive direction, the same one the compiler has with no list at all.
+#
+# Each output line is:
+#
+#   library name release [arch=release]...
+#
+# The release is the minor number, or a dash for never. Most names change in the same release on
+# every architecture, so the line gives that release once and then the architectures that differ.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. Only the symbol lists are
+# kept there. Each package is deleted after it is read. READELF names the reader, and the default is
+# readelf. It must be GNU readelf or llvm-readelf, because the parse expects their output.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/glibc-compat
+readelf=${READELF:-readelf}
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-compat: $*"; exit 1; }
+
+sha1() {
+	if command -v sha1sum >/dev/null 2>&1; then
+		sha1sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 1 "$1" | cut -d' ' -f1
+	fi
+}
+
+# The compiler's name for each Debian architecture, which is the name bin/abilist uses too.
+arch_name() {
+	case $1 in
+	amd64) printf 'x86_64\n' ;;
+	i386) printf 'x86\n' ;;
+	arm64) printf 'aarch64\n' ;;
+	armhf) printf 'arm\n' ;;
+	riscv64) printf 'riscv64\n' ;;
+	ppc64el) printf 'powerpc64\n' ;;
+	s390x) printf 's390x\n' ;;
+	loong64) printf 'loongarch64\n' ;;
+	*) die "$1 is not a Debian architecture this knows" ;;
+	esac
+}
+
+# The file names of each library. A new package has the real file under the soname. An old one has
+# the real file under a name with the release in it, and the soname is a link to it.
+lib_names() {
+	case $1 in
+	libc) printf '%s\n' 'libc.so.6' 'libc-2.*.so' ;;
+	libm) printf '%s\n' 'libm.so.6' 'libm-2.*.so' ;;
+	librt) printf '%s\n' 'librt.so.1' 'librt-2.*.so' ;;
+	ld) printf '%s\n' 'ld-linux*.so.*' 'ld64.so.*' 'ld-2.*.so' ;;
+	esac
+}
+
+# Every versioned name a library defines, one per line, as name@node or name@@node. A reference is
+# left out, and so are GLIBC_PRIVATE and the symbol that names each node. The field with the @ is the
+# name. The field before it is the section, which is UND for a reference. The column count is not
+# fixed, because on powerpc64 readelf adds a localentry column.
+names() {
+	"$readelf" --wide --dyn-syms "$1" |
+		awk '{ at = 0; for (i = 1; i <= NF; i++) if ($i ~ /@/) at = i; if (at > 1 && $(at - 1) != "UND") print $at }' |
+		awk -F'@' '$NF != "GLIBC_PRIVATE" && $1 != $NF' |
+		LC_ALL=C sort -u
+}
+
+[ -f "$pins" ] || die "there is no $pins"
+lists=$cache/glibc-compat
+mkdir -p "$lists"
+
+grep -v '^#' "$pins" | while IFS='	' read -r release version debarch sha; do
+	[ -n "$release" ] || continue
+	minor=${release#2.}
+	arch=$(arch_name "$debarch")
+	if [ -f "$lists/$minor-$arch-ld.txt" ]; then
+		continue
+	fi
+	work=$(mktemp -d "$cache/glibc-compat.XXXXXX")
+	say "fetching libc6 $version for $debarch"
+	curl -fsSL --retry 3 -o "$work/libc6.deb" "https://snapshot.debian.org/file/$sha"
+	got=$(sha1 "$work/libc6.deb")
+	[ "$got" = "$sha" ] || die "libc6 $version $debarch hashed to $got and sysroots/glibc-compat says $sha"
+	# A Debian package is an ar archive, and the files are in data.tar with some compression.
+	(cd "$work" && ar x libc6.deb)
+	data=$(find "$work" -maxdepth 1 -name 'data.tar*' | head -n 1)
+	[ -n "$data" ] || die "libc6 $version $debarch has no data.tar"
+	mkdir "$work/root"
+	tar -xf "$data" -C "$work/root"
+	for lib in libc libm librt ld; do
+		file=
+		for pattern in $(lib_names "$lib"); do
+			# The optimized copies in a subdirectory, as i686/cmov or glibc-hwcaps, are not the
+			# library a program links against.
+			file=$(find "$work/root" -type f -name "$pattern" |
+				grep -v -e /i686/ -e /tls/ -e hwcaps -e /x86_64/ -e /cmov/ -e '/power[0-9]' |
+				head -n 1)
+			[ -n "$file" ] && break
+		done
+		[ -n "$file" ] || die "libc6 $version $debarch has no $lib"
+		names "$file" >"$lists/$minor-$arch-$lib.txt.part"
+		mv "$lists/$minor-$arch-$lib.txt.part" "$lists/$minor-$arch-$lib.txt"
+	done
+	rm -rf "$work"
+done
+
+# For each architecture, library and name: the first measured release where the library defines the
+# name with no default definition. A name with a default definition in every measured release gets a
+# dash. Then, for each library and name, the release most architectures agree on, and the others.
+cd "$lists"
+list=$(for file in *-*-*.txt; do
+	printf '%s\n' "$file"
+done | awk '
+	{
+		split($0, k, "-"); m = k[1] + 0; a = k[2]; l = k[3]; sub(/\.txt$/, "", l)
+		have[a, l, m] = 1; arches[a] = 1; libs[l] = 1
+		while ((getline line < $0) > 0) {
+			n = line; sub(/@.*/, "", n)
+			names[l, n] = 1; seen[a, l, n] = 1
+			if (index(line, "@@")) d[a, l, n, m] = 1; else c[a, l, n, m] = 1
+		}
+		close($0)
+	}
+	END {
+		for (ln in names) {
+			split(ln, p, SUBSEP); l = p[1]; n = p[2]
+			delete count; delete at; total = 0
+			for (a in arches) {
+				if (!((a, l, n) in seen)) continue
+				at[a] = "-"; total++
+				for (m = 0; m < 100; m++)
+					if ((a, l, m) in have && (a, l, n, m) in c && !((a, l, n, m) in d)) { at[a] = m; break }
+				count[at[a]]++
+			}
+			best = ""; most = 0
+			for (v in count)
+				if (count[v] > most || (count[v] == most && v "" < best "")) { best = v; most = count[v] }
+			if (best == "-" && most == total) continue
+			out = l " " n " " best
+			o = 0; delete odd
+			for (a in at) if (at[a] != best) odd[++o] = a "=" at[a]
+			for (i = 2; i <= o; i++) for (j = i; j > 1 && odd[j] < odd[j - 1]; j--) { t = odd[j]; odd[j] = odd[j - 1]; odd[j - 1] = t }
+			for (i = 1; i <= o; i++) out = out " " odd[i]
+			print out
+		}
+	}') || die "the lists in $lists did not combine"
+printf '# Made by bin/glibc-compat in tamnd/rucc-cross from the packages in sysroots/glibc-compat.\n'
+printf '# library name release [arch=release]...\n'
+printf '%s\n' "$list" | LC_ALL=C sort
