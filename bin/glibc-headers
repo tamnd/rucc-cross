@@ -176,7 +176,7 @@ glibc_source() {
 # Everything under a directory, hashed, as manifest lines, in the C locale. The same function
 # bin/sysroot and bin/kernel-headers have, and the same reason: a record that carried the order a
 # directory walk returned would report a difference between two trees that are identical. The source
-# column is a function of the path here, because two files in this tree are not glibc's text as glibc
+# column is a function of the path here, because some files in this tree are not glibc's text as glibc
 # wrote it and the record is where that is said.
 manifest_lines() {
 	walk_root=$1
@@ -187,7 +187,7 @@ manifest_lines() {
 		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
 			case $walk_file in
 			generic/features.h) walk_origin="$walk_source-patched" ;;
-			*/gnu/stubs.h) walk_origin="$walk_source-stubs-prologue" ;;
+			*/gnu/stubs.h | */gnu/stubs-*.h) walk_origin="$walk_source-stubs" ;;
 			*) walk_origin=$walk_source ;;
 			esac
 			printf '%s\t%s\t%s\t%s\n' \
@@ -330,6 +330,20 @@ install_one() {
 			>"$one_work/$one_dir.configure.log" 2>&1 || exit 1
 		"$one_make" install-headers install_root="$one_work/install-$one_dir" \
 			install-bootstrap-headers=yes >"$one_work/$one_dir.make.log" 2>&1 || exit 1
+		# The two make variables that name the gnu/stubs files of this ABI, for the gnu/stubs.h step
+		# in produce. default-abi names the list of this ABI. abi-variants names every list of the
+		# family, and it is empty when the family has one ABI. The rule is given on the command line,
+		# because glibc has no target that prints them. The $(...) in it is make's, not the shell's.
+		# shellcheck disable=SC2016
+		"$one_make" -s --no-print-directory -r -C "$one_source" objdir="$one_work/build-$one_dir" \
+			--eval 'rucc-stubs: ; @printf "%s\n" "$(default-abi)" "$(abi-variants)"' rucc-stubs \
+			>"$one_work/$one_dir.abi" 2>>"$one_work/$one_dir.make.log" || exit 1
+		# The wrapper that includes the list of each ABI. glibc's own rule writes it from the same
+		# variables, and it does not need a full build.
+		if [ -n "$(sed -n 2p "$one_work/$one_dir.abi")" ]; then
+			"$one_make" -s --no-print-directory install_root="$one_work/stubs-$one_dir" \
+				"$one_work/stubs-$one_dir/usr/include/gnu/stubs.h" >>"$one_work/$one_dir.make.log" 2>&1 || exit 1
+		fi
 	) && printf 'ok\n' >"$one_work/$one_dir.status" || printf 'failed\n' >"$one_work/$one_dir.status"
 }
 
@@ -494,19 +508,54 @@ EOF
 		"$features" >"$features.patched"
 	mv "$features.patched" "$features"
 
-	# gnu/stubs.h, which glibc generates from a full build and install-headers therefore does not
-	# install. Every program gets it, because features.h includes it, so a tree without one compiles
-	# nothing at all. What it is missing is the list of functions that are there and fail with ENOSYS,
-	# which is a fact about the compiled library rather than about the headers, so this is glibc's own
-	# prologue with nothing appended. The cost is that a configure script asking whether chflags works
-	# is told yes, which is the permissive direction and the same shape as the compat symbol gap of
-	# tamnd/rucc#920. tamnd/rucc#941 is where the real list comes from.
-	# Counted with the rest of the per family files, because it is one of them once it is written and a
-	# count that did not match the manifest would be a count somebody has to explain every time.
+	# gnu/stubs.h. features.h includes it, so every program reads it. It has a `__stub_` macro for
+	# each function that is in the library but always fails with ENOSYS, and a configure script reads
+	# the macros. glibc gets the list from the objects of a full build, so install-headers does not
+	# install it. tamnd/rucc#941.
+	#
+	# The list of each ABI is glibc's prologue and then one macro for each name that
+	# sysroots/glibc-stubs gives, in the C locale order. That is the same text glibc's own rule writes.
+	# The names come from the Debian packages, and bin/glibc-stubs is where they are measured. When the
+	# family has more than one ABI, each list goes in gnu/stubs-<default-abi>.h, and gnu/stubs.h is
+	# the wrapper that glibc's rule wrote in install_one. The ABIs of a family must give the same
+	# wrapper, because the family has one directory. A family with one ABI has its list in gnu/stubs.h.
+	#
+	# The wrapper names a list for each ABI glibc knows, and we install some of them only. A program
+	# for an ABI we do not install, as soft float arm, gets an error that the list is not there. A
+	# Debian machine without that multilib package gives the same error.
+	#
+	# Counted with the rest of the per family files, because they are some of them once they are
+	# written and a count that did not match the manifest would be a count somebody has to explain.
+	stubs=$here/sysroots/glibc-stubs
 	for family in $families; do
 		mkdir -p "$work/tree/$family/gnu"
-		sed '/^@/d' "$source/include/stubs-prologue.h" >"$work/tree/$family/gnu/stubs.h"
-		private=$((private + 1))
+		for abi in $(printf '%s\n' "$live" | awk -F'\t' -v f="$family" '$3 == f { print $2 }'); do
+			names=$(awk -F'\t' -v r="$version" -v a="$abi" '$1 == r && $2 == a { print $7; found = 1 } END { exit !found }' "$stubs") ||
+				die "sysroots/glibc-stubs has no list for glibc $version on $abi, so add the package and run bin/glibc-stubs"
+			if [ -z "$(sed -n 2p "$work/$abi.abi")" ]; then
+				file=stubs.h
+			else
+				file=stubs-$(sed -n 1p "$work/$abi.abi").h
+				wrapper=$work/stubs-$abi/usr/include/gnu/stubs.h
+				[ -f "$wrapper" ] || die "glibc's rule did not write the gnu/stubs.h wrapper for $abi"
+				if [ -f "$work/tree/$family/gnu/stubs.h" ]; then
+					cmp -s "$wrapper" "$work/tree/$family/gnu/stubs.h" ||
+						die "the ABIs of $family give different gnu/stubs.h wrappers, so one directory cannot serve them"
+				else
+					cp "$wrapper" "$work/tree/$family/gnu/stubs.h"
+					private=$((private + 1))
+				fi
+			fi
+			[ ! -f "$work/tree/$family/gnu/$file" ] ||
+				die "two ABIs of $family write gnu/$file, so one directory cannot serve them"
+			{
+				sed '/^@/d' "$source/include/stubs-prologue.h"
+				for name in $names; do
+					[ "$name" = - ] || printf '#define __stub_%s\n' "$name"
+				done | LC_ALL=C sort
+			} >"$work/tree/$family/gnu/$file"
+			private=$((private + 1))
+		done
 	done
 
 	# Its own record rather than a sysroot manifest, for the reason bin/kernel-headers has one: a

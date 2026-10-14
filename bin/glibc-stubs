@@ -1,0 +1,79 @@
+#!/bin/sh
+# Measure the functions that glibc builds as stubs, for the gnu/stubs.h that bin/glibc-headers writes.
+#
+# usage: bin/glibc-stubs > sysroots/glibc-stubs.new && mv sysroots/glibc-stubs.new sysroots/glibc-stubs
+#
+# A stub is a function that is in the library but always fails with ENOSYS, as chflags on Linux.
+# glibc writes a `__stub_` macro for each one in gnu/stubs.h, and a configure script reads the macro
+# to know that the function does not work. glibc gets the list from the objects of a full build, so
+# `make install-headers` cannot give it. That is tamnd/rucc#941.
+#
+# The list comes from real packages. sysroots/glibc-stubs gives a Debian libc6-dev package for each
+# release and ABI that bin/glibc-headers installs. This gets each package from snapshot.debian.org,
+# checks its hash, and reads the `__stub_` macros out of its gnu/stubs headers. The output is the same
+# file with the last column written again. bin/glibc-headers reads the file and does not fetch
+# anything.
+#
+# The list depends on how the library was configured, so it is a measure of the Debian build and not
+# a fact of the glibc source. A different build can have a different list. The Debian build is the
+# library most of our targets run on, so it is the one we copy.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. Each package is deleted after
+# it is read.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+pins=$here/sysroots/glibc-stubs
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "glibc-stubs: $*"; exit 1; }
+
+sha1() {
+	if command -v sha1sum >/dev/null 2>&1; then
+		sha1sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 1 "$1" | cut -d' ' -f1
+	fi
+}
+
+[ -f "$pins" ] || die "there is no $pins"
+mkdir -p "$cache"
+
+# The names in one package, on one line and in the C locale order, or a dash when there are none.
+# The wrapper gnu/stubs.h has no macro in it, so only the file of the package's own ABI gives names.
+stub_names() {
+	work=$(mktemp -d "$cache/glibc-stubs.XXXXXX")
+	say "fetching $3 $1 for $2"
+	curl -fsSL --retry 3 -o "$work/package.deb" "https://snapshot.debian.org/file/$4"
+	got=$(sha1 "$work/package.deb")
+	[ "$got" = "$4" ] || die "$3 $1 $2 hashed to $got and sysroots/glibc-stubs says $4"
+	# A Debian package is an ar archive, and the files are in data.tar with some compression.
+	(cd "$work" && ar x package.deb)
+	data=$(find "$work" -maxdepth 1 -name 'data.tar*' | head -n 1)
+	[ -n "$data" ] || die "$3 $1 $2 has no data.tar"
+	mkdir "$work/root"
+	tar -xf "$data" -C "$work/root"
+	files=$(find "$work/root" -type f -path '*/gnu/stubs*.h')
+	[ -n "$files" ] || die "$3 $1 $2 has no gnu/stubs header"
+	# shellcheck disable=SC2086
+	names=$(sed -n 's/^#define __stub_\([A-Za-z0-9_]*\)$/\1/p' $files | LC_ALL=C sort -u | tr '\n' ' ')
+	rm -rf "$work"
+	names=${names% }
+	printf '%s\n' "${names:--}"
+}
+
+while IFS= read -r line; do
+	case $line in
+	'#'* | '')
+		printf '%s\n' "$line"
+		continue
+		;;
+	esac
+	printf '%s\n' "$line" | {
+		IFS='	' read -r release abi version debarch package sha _
+		names=$(stub_names "$version" "$debarch" "$package" "$sha")
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$release" "$abi" "$version" "$debarch" "$package" "$sha" "$names"
+	}
+done <"$pins"
