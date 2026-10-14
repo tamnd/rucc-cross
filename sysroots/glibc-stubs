@@ -1,0 +1,83 @@
+# The functions glibc builds as stubs, for each release and ABI that bin/glibc-headers installs.
+#
+# One record per line, tab separated:
+#
+#   release  abi  debian-version  debian-arch  package  sha1  names
+#
+# The abi is the name bin/glibc-headers gives the install. The package is the Debian libc6-dev package
+# that has the stubs header of that ABI. For i386 and x32 it is the multilib package of amd64. The sha1
+# is the hash snapshot.debian.org files the package under, so the url is
+# https://snapshot.debian.org/file/<sha1>. Each release uses the Debian build that bin/glibc-compat
+# uses, except 2.36. That release uses 2.36-9, because the stable updates after it have no riscv64
+# build, and loong64 uses the 2.36-9+loong64 build of debian-ports.
+#
+# The names are the functions the package's gnu/stubs header has a `__stub_` macro for, in the C
+# locale order. A dash means none. bin/glibc-stubs measures them again from the packages.
+2.28	x86_64	2.28-10	amd64	libc6-dev	5bc455a89702e4d0fccd7b9a4b97c28604cbd3e0	__compat_bdflush chflags fattach fchflags fdetach getmsg gtty lchmod putmsg revoke setlogin sigreturn sstk stty
+2.28	i386	2.28-10	amd64	libc6-dev-i386	743ebeea5cc7859f63caa3dfb5c6126fedc2385e	chflags fattach fchflags fdetach gtty lchmod revoke setlogin sigreturn sstk stty
+2.28	x32	2.28-10	amd64	libc6-dev-x32	0288c1b59ba4131369b7adaa640d611fb922e840	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fattach fchflags fdetach getmsg gtty lchmod putmsg revoke setlogin sigreturn sstk stty
+2.28	aarch64	2.28-10	arm64	libc6-dev	7aa16e78c8bcf99d82dc888e4e4603b9bdd62b96	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fattach fchflags fdetach getmsg getpmsg gtty lchmod putmsg putpmsg revoke setlogin sigreturn sstk stty sysctl
+2.28	arm	2.28-10	armhf	libc6-dev	e8be277b1bdc869581a233cafff5c75a3c3c9408	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fattach fchflags fdetach getmsg getpmsg gtty lchmod putmsg putpmsg revoke setlogin sigreturn sstk stty
+2.28	riscv64	2.28-10	riscv64	libc6-dev	8fa6769b0613e255a2644990a7b7c02f6b8be6dd	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fattach fchflags fdetach fedisableexcept feenableexcept fegetexcept getmsg getpmsg gtty lchmod putmsg putpmsg revoke setlogin sigreturn sstk stty sysctl
+2.28	powerpc64	2.28-10	ppc64el	libc6-dev	bb9f58644441b652db0944e7b74b6ba1eec8e435	chflags fattach fchflags fdetach gtty lchmod revoke setlogin sigreturn sstk stty
+2.28	s390x	2.28-10	s390x	libc6-dev	6105d546b0be593686302c76ba0fb86d752482f1	chflags fattach fchflags fdetach getmsg gtty lchmod pkey_alloc pkey_free putmsg revoke setlogin sigreturn sstk stty
+2.31	x86_64	2.31-17	amd64	libc6-dev	dcb6d5600e5f43b4f5765ec38c73adf246fd623c	__compat_bdflush chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty
+2.31	i386	2.31-17	amd64	libc6-dev-i386	d5bf62cfaad08ae612621071281980916fe7a9fa	chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty
+2.31	x32	2.31-17	amd64	libc6-dev-x32	f21b262ece7125e2a4af4ca94bd3551d95530642	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty
+2.31	aarch64	2.31-17	arm64	libc6-dev	14362bd513e8e4bf824b04d6d952b646fcb7498e	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty sysctl
+2.31	arm	2.31-17	armhf	libc6-dev	458c21f096331f9217f5605eae4f80becd580899	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty
+2.31	riscv64	2.31-17	riscv64	libc6-dev	fead4300714d59f81e44eba29e157b7cbcb884cb	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty lchmod revoke setlogin sigreturn sstk stty sysctl
+2.31	powerpc64	2.31-17	ppc64el	libc6-dev	76de7991e7f7734ed54719f814a5aefddf7e88de	chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty
+2.31	s390x	2.31-17	s390x	libc6-dev	e6d2b050ee2ffb3c26d4260fba10d9c73660620d	chflags fchflags gtty lchmod revoke setlogin sigreturn sstk stty
+2.34	x86_64	2.34-8	amd64	libc6-dev	97a880de93ae433820240efd78cc239ba17a9168	__compat_bdflush chflags fchflags gtty revoke setlogin sigreturn stty
+2.34	i386	2.34-8	amd64	libc6-dev-i386	fc3378d9d6cf662c4deada79bd48d0f77902aa5a	chflags fchflags gtty revoke setlogin sigreturn stty
+2.34	x32	2.34-8	amd64	libc6-dev-x32	c531f95e1bc617c80712a34597b918078ef32991	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.34	aarch64	2.34-8	arm64	libc6-dev	4918d105bf27ce21050d391cb0be039a12db4401	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.34	arm	2.34-8	armhf	libc6-dev	7b41ac46ef61cf10347ef1d54d8c38e59b8b3d41	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty revoke setlogin sigreturn stty
+2.34	riscv64	2.34-8	riscv64	libc6-dev	1db7d94bdea9fac6cbffe151d0c4b49aaee5e0fc	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty revoke setlogin sigreturn stty
+2.34	powerpc64	2.34-8	ppc64el	libc6-dev	063bf70f179cff9747282dd7a306d24527ff0d31	chflags fchflags gtty revoke setlogin sigreturn stty
+2.34	s390x	2.34-8	s390x	libc6-dev	2d2e8d982c5df30878ba590358c77f16ed68ed9e	chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	x86_64	2.35-4	amd64	libc6-dev	35e639561a15072c95a2439ea67e57a8ab48d51c	__compat_bdflush chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	i386	2.35-4	amd64	libc6-dev-i386	732a0511cef7ea433a71348bc50ed6b8e9086291	chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	x32	2.35-4	amd64	libc6-dev-x32	6eb8d8d992d3d9f8df2a2902a70c0cca8b9a356e	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	aarch64	2.35-4	arm64	libc6-dev	4a895d1c92815604cf75257173dd67cd2a9ea108	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	arm	2.35-4	armhf	libc6-dev	cfa3bedc9cd77f7a3aacb0baefd6f689444ddcc1	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	riscv64	2.35-4	riscv64	libc6-dev	661b0b06ce60a8fd61fa86b7d994e2a02db627ca	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty revoke setlogin sigreturn stty
+2.35	powerpc64	2.35-4	ppc64el	libc6-dev	138876e0808a052e0792d710f8678c449db5d95c	chflags fchflags gtty revoke setlogin sigreturn stty
+2.35	s390x	2.35-4	s390x	libc6-dev	b1f98a793117da6164680f7272453d7cb406d065	chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	x86_64	2.36-9	amd64	libc6-dev	82bdd995c40d95372b69be64cda8abcb69de04da	__compat_bdflush chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	i386	2.36-9	amd64	libc6-dev-i386	2f4887061f5f39c655e08a423e67c80655c066a4	chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	x32	2.36-9	amd64	libc6-dev-x32	efd109d148e38da96f5cfcd6b596d7525ffe2190	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	aarch64	2.36-9	arm64	libc6-dev	8b0aa95066250a2317a6f391e9764c3b0de414b1	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	arm	2.36-9	armhf	libc6-dev	ba7ee80e0ba9b70cac695c9ac886a13365adacd4	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	riscv64	2.36-9	riscv64	libc6-dev	110fb63d4c5ffacdaf5f9ad9b017770317d9c557	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty revoke setlogin sigreturn stty
+2.36	loongarch64	2.36-9+loong64	loong64	libc6-dev	7fd475992cc1ab5807a4f2126612f610570b8a01	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	powerpc64	2.36-9	ppc64el	libc6-dev	a0b7b47562b905b6bf9349e4e5370a97f0c3b5c7	chflags fchflags gtty revoke setlogin sigreturn stty
+2.36	s390x	2.36-9	s390x	libc6-dev	b034b089bb8e4594343e936cc2c2b080833e8ef2	chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	x86_64	2.39-7	amd64	libc6-dev	9410d838dfeb2d913e2b4b7d821c6f3126968aa9	__compat_bdflush chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	i386	2.39-7	amd64	libc6-dev-i386	1a83a256adc782f3dba645ab2e1f94e1bb7b1169	chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	x32	2.39-7	amd64	libc6-dev-x32	c5bab1b6741ebef8529cb5d4feb1c5dae60ee602	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	aarch64	2.39-7	arm64	libc6-dev	bda58b3be45ff60af3aa52eec2d072f9022b0f4c	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	arm	2.39-7	armhf	libc6-dev	0760beeb3f13421c9dc451d8f9de864db7fab4df	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	riscv64	2.39-7	riscv64	libc6-dev	651a86d3cd0a61636731f78ba75ffa3d1dcaf210	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty revoke setlogin sigreturn stty
+2.39	loongarch64	2.39-7	loong64	libc6-dev	dd53565e19fc41660bf5cce08d591c379e623b3f	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	powerpc64	2.39-7	ppc64el	libc6-dev	817bf3c12203cd5916b2905d6001560787b82f7a	chflags fchflags gtty revoke setlogin sigreturn stty
+2.39	s390x	2.39-7	s390x	libc6-dev	1d2eb6758fc5a3964c1d87c07946875898071703	chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	x86_64	2.41-12	amd64	libc6-dev	469b51f2f1a7b3fc2525a34225a7b6c3a8e4270d	__compat_bdflush chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	i386	2.41-12	amd64	libc6-dev-i386	212b96fad0b610ddd3cedb0f676e17a3ef30055c	chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	x32	2.41-12	amd64	libc6-dev-x32	8b20e5f87953a9169dae5410744a14ee630e17fe	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	aarch64	2.41-12	arm64	libc6-dev	c79674db21200bf12d1a35c7c57d2266ff725f7e	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	arm	2.41-12	armhf	libc6-dev	26ba89162c51ac78fb62438fc26d0efe3eaf9173	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	riscv64	2.41-12	riscv64	libc6-dev	55fee84a11241c40106a83b1aa2dd9135b85556d	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty revoke setlogin sigreturn stty
+2.41	loongarch64	2.41-12	loong64	libc6-dev	882cbfe71f2c9e84a477db6faccb1ab5c560a122	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	powerpc64	2.41-12	ppc64el	libc6-dev	f7a0050c0b90765516db264ba3da93feeb2671a8	chflags fchflags gtty revoke setlogin sigreturn stty
+2.41	s390x	2.41-12	s390x	libc6-dev	27bac25917bc192166df25eb41378bc5feab301e	chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	x86_64	2.44-1	amd64	libc6-dev	19e80737cd209ee86481dbe062c30f774b1754e2	__compat_bdflush chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	i386	2.44-1	amd64	libc6-dev-i386	f4fe189d91ec8bdd7ab16aa37c92a840c72d8f86	chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	x32	2.44-1	amd64	libc6-dev-x32	2fd97234caf01e2cd3a39ca2baa7e74ae82fbfab	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_nfsservctl __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	aarch64	2.44-1	arm64	libc6-dev	8d2cc802f0ffc39088d366ad4e4a28c139982b07	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	arm	2.44-1	armhf	libc6-dev	a5e3c5674aaaaf2d927767b6d772b8be6bfb7ec8	__compat_create_module __compat_get_kernel_syms __compat_query_module chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	riscv64	2.44-1	riscv64	libc6-dev	bc47f6389d8773e483c827b9f0c0428e587653b8	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags fedisableexcept feenableexcept fegetexcept gtty revoke setlogin sigreturn stty
+2.44	loongarch64	2.44-1	loong64	libc6-dev	c1dd95340dc13cd49748140d758274690f1261ed	__compat_bdflush __compat_create_module __compat_get_kernel_syms __compat_query_module __compat_uselib chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	powerpc64	2.44-1	ppc64el	libc6-dev	14ad5fae1c5c46311084931db864a9fd61e1bca8	chflags fchflags gtty revoke setlogin sigreturn stty
+2.44	s390x	2.44-1	s390x	libc6-dev	8abcb0d7550813ca35944b2544876305489b5a4c	chflags fchflags gtty revoke setlogin sigreturn stty

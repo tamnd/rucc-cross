@@ -47,8 +47,7 @@
 #
 # What is still not here is the stub shared objects and a static libc.a, so rcrt1.o and grcrt1.o are
 # produced and not linked: both start a static PIE and there is nothing static to link them against.
-# Mcrt1.o is not linked either, for its own reason, which link_and_run gives. A real gnu/stubs.h is the
-# other thing a full build would give and that is tamnd/rucc#941.
+# Mcrt1.o is not linked either, for its own reason, which link_and_run gives.
 
 set -eu
 

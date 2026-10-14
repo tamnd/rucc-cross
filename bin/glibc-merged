@@ -22,7 +22,7 @@
 # meaningless one in the output.
 #
 # So what comes out is the whole tree, and not a sample of it. Every ABI, the patched features.h and
-# the synthesized gnu/stubs.h included, because those are bin/glibc-headers' and this merges what
+# the written gnu/stubs files included, because those are bin/glibc-headers' and this merges what
 # that leaves behind rather than reaching around it.
 #
 # The grid is ragged and the merge is what makes that harmless. glibc learned loongarch64 in 2.36, so
@@ -67,7 +67,7 @@ sha256() {
 # Everything under a directory, hashed, as manifest lines, in the C locale. The same function
 # bin/glibc-headers has, with the same two special cases: every file here is every release of one of
 # its files at once, so the origin column says what the file is rather than which release it came
-# from, and the two that are not glibc's own text are still the two that are not glibc's own text.
+# from, and the files that are not glibc's own text are still the files that are not glibc's own text.
 manifest_lines() {
 	walk_root=$1
 	walk_licence=$2
@@ -76,7 +76,7 @@ manifest_lines() {
 		find . -type f ! -name manifest | sed 's|^\./||' | LC_ALL=C sort | while read -r walk_file; do
 			case $walk_file in
 			generic/features.h) walk_origin=glibc-merged-patched ;;
-			*/gnu/stubs.h) walk_origin=glibc-merged-stubs-prologue ;;
+			*/gnu/stubs.h | */gnu/stubs-*.h) walk_origin=glibc-merged-stubs ;;
 			*) walk_origin=glibc-merged ;;
 			esac
 			printf '%s\t%s\t%s\t%s\n' \
