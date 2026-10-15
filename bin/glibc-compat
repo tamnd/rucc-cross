@@ -1,32 +1,48 @@
 #!/bin/sh
-# List the glibc symbols that a new link cannot bind to, for the compiler's glibc stubs.
+# Measure what the glibc abilists cannot say, for the compiler's glibc stubs.
 #
-# usage: bin/glibc-compat > compat.txt
+# usage: bin/glibc-compat [compat | moved | defaults] > list.txt
 #
-# glibc keeps some symbols only for programs that were linked against them in the past. Such a
-# symbol has a definition at a version node, as `xdr_opaque@GLIBC_2.2.5`, but no default definition,
-# so a new link that names it fails. An abilist cannot show this. The line for such a symbol has the
-# same three fields as the line for any other symbol. The compiler writes its stubs from the
-# abilists, so without this list its stubs let a program link that a real glibc refuses. That is
-# tamnd/rucc#920.
+# The compiler writes its glibc stubs from the abilists of one new glibc, cut at the release the
+# target asks for. Three facts of a real library are not in an abilist, and each mode writes one of
+# them. The compiler commits each output in crates/rucc-stub/glibc.
 #
-# The list comes from real libraries. For each release and architecture in sysroots/glibc-compat,
+# compat, the default, writes compat.txt. glibc keeps some symbols only for programs that were
+# linked against them in the past. Such a symbol has a definition at a version node, as
+# `xdr_opaque@GLIBC_2.2.5`, but no default definition, so a new link that names it fails. The line
+# for such a symbol in an abilist is the same as the line for any other symbol. That is
+# tamnd/rucc#920. A name is compat only in a release when the library defines it and has no default
+# definition of it. The output gives, for each name, the first release where it is compat only.
+#
+# moved writes moved.txt. glibc moved names from one library into another, most of them into libc in
+# 2.34. A new abilist lists such a name in its new library at its old node, as
+# `pthread_create@GLIBC_2.2.5` in libc, so a stub cut at 2.28 has it in libc, and the real 2.28 libc
+# does not. That is tamnd/rucc#3666. A definition moved into a library at release m when the library
+# has it in m and not in the measured release before m, and its node is older than m. The output
+# gives the release and the library that had the definition before.
+#
+# defaults writes defaults.txt. The compiler takes the highest node of a name as its default, which is
+# how glibc adds a new version of a function. For a few names on x86 and s390x the default is an older
+# node. That is tamnd/rucc#3660. The output gives the default node of each such name.
+#
+# The lists come from real libraries. For each release and architecture in sysroots/glibc-compat,
 # this gets the Debian libc6 package from snapshot.debian.org, checks its hash, and reads libc, libm,
-# librt and the loader with readelf. A name is compat only in a release when the library defines it
-# and has no default definition of it. The output gives, for each name, the first release where it
-# is compat only. A target at that release or a later one gets a stub with no default definition of
-# the name.
+# librt, the loader, libpthread, libdl, libutil, libanl and libresolv with readelf.
 #
 # A release that Debian did not build is not measured. When a name changes in such a gap, the list
-# gives the first measured release after the change. A target in the gap then still gets the default
-# definition. That is the permissive direction, the same one the compiler has with no list at all.
+# gives the first measured release after the change. A target in the gap then gets the stub of the
+# release before the change.
 #
-# Each output line is:
+# The output lines are:
 #
-#   library name release [arch=release]...
+#   compat:   library name release [arch=release]...
+#   moved:    library name origin release [arch=release]...
+#   defaults: library name arch node
 #
 # The release is the minor number, or a dash for never. Most names change in the same release on
-# every architecture, so the line gives that release once and then the architectures that differ.
+# every architecture, so the line gives that release once and then the architectures that differ. In
+# moved, the name is name@node when the library had the name at another node before the move, and
+# only that one definition moved. The origin is a dash when no library had the definition before.
 #
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross. Only the symbol lists are
 # kept there. Each package is deleted after it is read. READELF names the reader, and the default is
@@ -38,6 +54,8 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
 pins=$here/sysroots/glibc-compat
 readelf=${READELF:-readelf}
+# The libraries read from each package. The last one is the one the cache is checked for.
+libraries='libc libm librt ld libpthread libdl libutil libanl libresolv'
 
 say() { printf '%s\n' "$*" >&2; }
 die() { say "glibc-compat: $*"; exit 1; }
@@ -73,6 +91,11 @@ lib_names() {
 	libm) printf '%s\n' 'libm.so.6' 'libm-2.*.so' ;;
 	librt) printf '%s\n' 'librt.so.1' 'librt-2.*.so' ;;
 	ld) printf '%s\n' 'ld-linux*.so.*' 'ld64.so.*' 'ld-2.*.so' ;;
+	libpthread) printf '%s\n' 'libpthread.so.0' 'libpthread-2.*.so' ;;
+	libdl) printf '%s\n' 'libdl.so.2' 'libdl-2.*.so' ;;
+	libutil) printf '%s\n' 'libutil.so.1' 'libutil-2.*.so' ;;
+	libanl) printf '%s\n' 'libanl.so.1' 'libanl-2.*.so' ;;
+	libresolv) printf '%s\n' 'libresolv.so.2' 'libresolv-2.*.so' ;;
 	esac
 }
 
@@ -87,6 +110,11 @@ names() {
 		LC_ALL=C sort -u
 }
 
+mode=${1:-compat}
+case $mode in
+compat | moved | defaults) ;;
+*) die "usage: bin/glibc-compat [compat | moved | defaults]" ;;
+esac
 [ -f "$pins" ] || die "there is no $pins"
 lists=$cache/glibc-compat
 mkdir -p "$lists"
@@ -95,7 +123,7 @@ grep -v '^#' "$pins" | while IFS='	' read -r release version debarch sha; do
 	[ -n "$release" ] || continue
 	minor=${release#2.}
 	arch=$(arch_name "$debarch")
-	if [ -f "$lists/$minor-$arch-ld.txt" ]; then
+	if [ -f "$lists/$minor-$arch-libresolv.txt" ]; then
 		continue
 	fi
 	work=$(mktemp -d "$cache/glibc-compat.XXXXXX")
@@ -109,7 +137,7 @@ grep -v '^#' "$pins" | while IFS='	' read -r release version debarch sha; do
 	[ -n "$data" ] || die "libc6 $version $debarch has no data.tar"
 	mkdir "$work/root"
 	tar -xf "$data" -C "$work/root"
-	for lib in libc libm librt ld; do
+	for lib in $libraries; do
 		file=
 		for pattern in $(lib_names "$lib"); do
 			# The optimized copies in a subdirectory, as i686/cmov or glibc-hwcaps, are not the
@@ -119,53 +147,163 @@ grep -v '^#' "$pins" | while IFS='	' read -r release version debarch sha; do
 				head -n 1)
 			[ -n "$file" ] && break
 		done
-		[ -n "$file" ] || die "libc6 $version $debarch has no $lib"
+		if [ -z "$file" ]; then
+			# A port that is newer than 2.34 does not have all four of the libraries glibc emptied
+			# then. loong64 has libpthread and libdl, and it does not have libutil or libanl. A
+			# library that is not there defines nothing.
+			case $lib in
+			libpthread | libdl | libutil | libanl) say "libc6 $version $debarch has no $lib" ;;
+			*) die "libc6 $version $debarch has no $lib" ;;
+			esac
+			: >"$lists/$minor-$arch-$lib.txt"
+			continue
+		fi
 		names "$file" >"$lists/$minor-$arch-$lib.txt.part"
 		mv "$lists/$minor-$arch-$lib.txt.part" "$lists/$minor-$arch-$lib.txt"
 	done
 	rm -rf "$work"
 done
 
-# For each architecture, library and name: the first measured release where the library defines the
-# name with no default definition. A name with a default definition in every measured release gets a
-# dash. Then, for each library and name, the release most architectures agree on, and the others.
+# The lists are read once into these arrays, keyed by architecture, library, name and release:
+#   def[a, l, n, m, v]   the library defines the name at node v, as a default or not
+#   dflt[a, l, n, m]     the node of the default definition, when there is one
+#   nodes[a, l, n, m]    every node the library defines the name at, separated by spaces
+#   node[a, m, v]        some library of the package has node v
 cd "$lists"
 list=$(for file in *-*-*.txt; do
 	printf '%s\n' "$file"
-done | awk '
+done | awk -v mode="$mode" '
+	# Compare two nodes as GLIBC_2.2.5 and GLIBC_2.17, by number. Returns -1, 0 or 1.
+	function compare(x, y,    p, q, i, np, nq) {
+		sub(/^GLIBC_/, "", x); sub(/^GLIBC_/, "", y)
+		np = split(x, p, "."); nq = split(y, q, ".")
+		for (i = 1; i <= np || i <= nq; i++) {
+			if ((p[i] + 0) < (q[i] + 0)) return -1
+			if ((p[i] + 0) > (q[i] + 0)) return 1
+		}
+		return 0
+	}
+	# The release most architectures agree on, then the others as arch=release, in order.
+	function line(head, at,    count, best, most, v, a, o, odd, i, j, t, out) {
+		best = ""; most = 0
+		for (a in at) count[at[a]]++
+		for (v in count)
+			if (count[v] > most || (count[v] == most && v "" < best "")) { best = v; most = count[v] }
+		out = head " " best
+		o = 0
+		for (a in at) if (at[a] != best) odd[++o] = a "=" at[a]
+		for (i = 2; i <= o; i++) for (j = i; j > 1 && odd[j] < odd[j - 1]; j--) { t = odd[j]; odd[j] = odd[j - 1]; odd[j - 1] = t }
+		for (i = 1; i <= o; i++) out = out " " odd[i]
+		return out
+	}
 	{
 		split($0, k, "-"); m = k[1] + 0; a = k[2]; l = k[3]; sub(/\.txt$/, "", l)
-		have[a, l, m] = 1; arches[a] = 1; libs[l] = 1
-		while ((getline line < $0) > 0) {
-			n = line; sub(/@.*/, "", n)
-			names[l, n] = 1; seen[a, l, n] = 1
-			if (index(line, "@@")) d[a, l, n, m] = 1; else c[a, l, n, m] = 1
+		have[a, l, m] = 1; arches[a] = 1; libs[l] = 1; measured[a, m] = 1
+		while ((getline entry < $0) > 0) {
+			n = entry; sub(/@.*/, "", n)
+			v = entry; sub(/.*@/, "", v)
+			names[l, n] = 1; seen[a, l, n] = 1; any[a, l, n, m] = 1
+			def[a, l, n, m, v] = 1; node[a, m, v] = 1
+			nodes[a, l, n, m] = nodes[a, l, n, m] " " v
+			if (index(entry, "@@")) { d[a, l, n, m] = 1; dflt[a, l, n, m] = v } else c[a, l, n, m] = 1
 		}
 		close($0)
 	}
 	END {
+		if (mode == "compat") compat()
+		if (mode == "moved") moved()
+		if (mode == "defaults") defaults()
+	}
+	# For each architecture, library and name: the first measured release where the library defines
+	# the name with no default definition. A name with a default definition in every measured release
+	# gets a dash. Then, for each library and name, the release most architectures agree on, and the
+	# others.
+	function compat(    ln, p, l, n, at, total, a, m, all) {
 		for (ln in names) {
 			split(ln, p, SUBSEP); l = p[1]; n = p[2]
-			delete count; delete at; total = 0
+			delete at; total = 0; all = 1
 			for (a in arches) {
 				if (!((a, l, n) in seen)) continue
 				at[a] = "-"; total++
 				for (m = 0; m < 100; m++)
 					if ((a, l, m) in have && (a, l, n, m) in c && !((a, l, n, m) in d)) { at[a] = m; break }
-				count[at[a]]++
+				if (at[a] != "-") all = 0
 			}
-			best = ""; most = 0
-			for (v in count)
-				if (count[v] > most || (count[v] == most && v "" < best "")) { best = v; most = count[v] }
-			if (best == "-" && most == total) continue
-			out = l " " n " " best
-			o = 0; delete odd
-			for (a in at) if (at[a] != best) odd[++o] = a "=" at[a]
-			for (i = 2; i <= o; i++) for (j = i; j > 1 && odd[j] < odd[j - 1]; j--) { t = odd[j]; odd[j] = odd[j - 1]; odd[j - 1] = t }
-			for (i = 1; i <= o; i++) out = out " " odd[i]
-			print out
+			if (all) continue
+			print line(l " " n, at)
+		}
+	}
+	# A definition moved into a library at release m when the library defines the name at node v in
+	# m and not in the measured release before m, and node v is older than m, which means some
+	# library of the package before m already has it. A new name at a new node is not a move.
+	#
+	# When the library had no definition of the name at all before m, the line names the name alone.
+	# A target before m then gets no definition of it from the library. When the library already had
+	# another node of the name, the line names the node as name@node, and only that definition goes.
+	# The origin is the library that had the definition before m, or a dash when none had it.
+	function moved(    prev, a, m, last, key, p, l, n, v, b, o, origin, what, head, at, done, total) {
+		for (a in arches) {
+			last = ""
+			for (m = 0; m < 100; m++)
+				if ((a, m) in measured) { if (last != "") prev[a, m] = last; last = m }
+		}
+		for (key in def) {
+			split(key, p, SUBSEP); a = p[1]; l = p[2]; n = p[3]; m = p[4]; v = p[5]
+			# glibc puts a placeholder at each node of a library it emptied, so that the node stays.
+			# Nothing calls it, so it is not a move.
+			if (!((a, m) in prev) || n ~ /_version_placeholder$/) continue
+			b = prev[a, m]
+			if ((a, l, n, b, v) in def || !((a, b, v) in node)) continue
+			origin = "-"
+			for (o in libs)
+				if (o != l && (a, o, n, b, v) in def) origin = o
+			what = ((a, l, n, b) in any) ? n "@" v : n
+			head = l " " what " " origin
+			heads[head] = 1; lib[head] = l; nm[head] = n; nd[head] = (what == n) ? "" : v
+			if (!((head, a) in when) || m < when[head, a]) when[head, a] = m
+		}
+		for (head in heads) {
+			delete at
+			for (a in arches) {
+				l = lib[head]; n = nm[head]; v = nd[head]
+				done = 0
+				for (m = 0; m < 100 && !done; m++)
+					if (v == "" ? (a, l, n, m) in any : (a, l, n, m, v) in def) done = 1
+				if (!done) continue
+				at[a] = ((head, a) in when) ? when[head, a] : "-"
+			}
+			print line(head, at)
+		}
+	}
+	# A name whose default definition is not at its highest node, for each architecture where that is
+	# so in some measured release. The line is printed only when the default is the same node in every
+	# release that defines the name at that node. Otherwise the name is reported and left out.
+	function defaults(    key, p, a, l, n, m, v, list, i, k, high, want, bad, out) {
+		for (key in dflt) {
+			split(key, p, SUBSEP); a = p[1]; l = p[2]; n = p[3]; m = p[4]
+			k = split(nodes[key], list, " ")
+			high = list[1]
+			for (i = 2; i <= k; i++) if (compare(list[i], high) > 0) high = list[i]
+			if (high == dflt[key]) continue
+			if ((a, l, n) in want && want[a, l, n] != dflt[key]) bad[a, l, n] = 1
+			want[a, l, n] = dflt[key]
+		}
+		for (key in dflt) {
+			split(key, p, SUBSEP); a = p[1]; l = p[2]; n = p[3]; m = p[4]
+			if (!((a, l, n) in want)) continue
+			v = want[a, l, n]
+			if ((a, l, n, m, v) in def && dflt[key] != v) bad[a, l, n] = 1
+		}
+		for (key in want) {
+			split(key, p, SUBSEP)
+			if (key in bad) { printf "glibc-compat: the default of %s in %s on %s is not the same node in every release\n", p[3], p[2], p[1] > "/dev/stderr"; continue }
+			print p[2] " " p[3] " " p[1] " " want[key]
 		}
 	}') || die "the lists in $lists did not combine"
 printf '# Made by bin/glibc-compat in tamnd/rucc-cross from the packages in sysroots/glibc-compat.\n'
-printf '# library name release [arch=release]...\n'
+case $mode in
+compat) printf '# library name release [arch=release]...\n' ;;
+moved) printf '# library name origin release [arch=release]...\n' ;;
+defaults) printf '# library name arch node\n' ;;
+esac
 printf '%s\n' "$list" | LC_ALL=C sort
