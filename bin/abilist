@@ -22,6 +22,9 @@
 # compiler's description blob is packed from all three and not from libc alone. ld.abilist is the
 # loader's, and it goes beside them too. On AArch64, Arm, RISC-V and LoongArch the loader exports
 # __stack_chk_guard, so a cross link with the stack protector needs a stub of the loader.
+# libresolv.abilist goes beside them too. A program that calls res_query or ns_initparse links with
+# -lresolv on every glibc, and before 2.34 libresolv also had the names that then moved into libc.
+# That is tamnd/rucc#3676.
 #
 # The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross, so the download survives a
 # branch switch. Doing this twice is a no-op, because a file that is already extracted is left alone.
@@ -74,9 +77,9 @@ abilist_dir() {
 
 all="x86_64 x86 aarch64 arm riscv64 powerpc64 s390x loongarch64"
 
-# The libraries taken out of each directory. Every port has all four, so a missing one is a moved
+# The libraries taken out of each directory. Every port has all five, so a missing one is a moved
 # path in a new glibc and tar says so by name.
-libs="libc libm librt ld"
+libs="libc libm librt ld libresolv"
 
 # The pinned glibc line from sysroots/manifest, which is where a libc source belongs whatever is
 # taken out of it. M9.5 builds a sysroot from this same row.
