@@ -152,11 +152,15 @@ if [ -n "$missing" ]; then
 fi
 
 # One line per symbol, counting the GLIBC_PRIVATE ones that a stub leaves out, so this is the size of
-# the description rather than the size of the stub. The xtask side prints both.
+# the description rather than the size of the stub. The xtask side prints both. On stderr, with the
+# rest of what this says to a person, because stdout is the directory and nothing else, so that
+# RUCC_ABILISTS=$(bin/abilist x86_64) works. The ci of tamnd/rucc does exactly that, and with the
+# counts on stdout it wrote them into its environment file and the real-libc job stopped there.
 for arch in $arches; do
 	for lib in $libs; do
-		printf '%-10s %-6s %s lines\n' "$arch" "$lib" "$(wc -l <"$into/$arch/$lib.abilist" | tr -d ' ')"
+		say "$(printf '%-10s %-6s %s lines' "$arch" "$lib" "$(wc -l <"$into/$arch/$lib.abilist" | tr -d ' ')")"
 	done
 done
 say "the abilists of glibc $version are in $into"
 say "the compiler reads them from there as RUCC_ABILISTS=$into cargo xtask real-libc"
+printf '%s\n' "$into"
