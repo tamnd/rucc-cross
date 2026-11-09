@@ -12,9 +12,11 @@
 # corpus/glibc that are POSIX rather than glibc, and corpus/bsd, which is the thread local storage
 # and the start up code that each BSD does its own way. Each is built three ways: with no options,
 # which is whatever kind of executable the compiler makes for the system by default, the same at
-# -O2, and a static program. On NetBSD a fourth time as a static PIE, which NetBSD's GCC links
-# and the others do not, and whose crt0.o relocates the program before anything else runs. dso.c
-# is not built static, because it is a program and a shared object.
+# -O2, and a static program. On NetBSD amd64 a fourth time as a static PIE, which NetBSD's GCC
+# links and the others do not, and whose crt0.o relocates the program before anything else runs.
+# NetBSD's crt0.o does that only on x86 (HAS_RELOCATE_SELF in lib/csu/common/crt0-common.c), so on
+# aarch64 and riscv64 a static PIE is never relocated, whichever compiler made it, and it is not
+# built there. dso.c is not built static, because it is a program and a shared object.
 #
 # Nothing runs here, because this machine is not a BSD. <out> gets the programs, their expected
 # output, bin/bsd-run and a list of what was meant to be built, and bin/bsd-run on the BSD runs
@@ -64,7 +66,7 @@ cc() {
 }
 
 variants="default O2 static"
-[ "$system" = netbsd ] && variants="$variants static-pie"
+[ "$system.$arch" = netbsd.amd64 ] && variants="$variants static-pie"
 
 built=0
 failed=0
@@ -80,9 +82,20 @@ for program in $programs; do
 		default) flags="" ;;
 		O2) flags="-O2" ;;
 		static) flags="-static" ;;
-		static-pie) flags="-static-pie" ;;
+		# `-static -pie` and not `-static-pie`, because NetBSD's GCC has no spec for the one word
+		# and links an ordinary program for it, and reads the two words together as a static PIE.
+		# With -fPIE, because its code is not position independent unless it is told.
+		static-pie) flags="-fPIE -static -pie" ;;
 		esac
 		case $name.$variant in dso.static*) continue ;; esac
+		# NetBSD's libc sets up the thread local storage of a static program itself, and on aarch64
+		# and riscv64 it puts the block straight after the thread control block and does not align
+		# it (lib/libc/tls/tls.c), where the offsets the linker works out take it as aligned. tls.c
+		# has a variable aligned to 64, so in a static program for those two the aarch64 code reads
+		# the wrong bytes and the riscv64 variable is not aligned, whichever compiler made it. GCC
+		# folds the alignment test in tls.c to true, so its riscv64 program does not show the second.
+		# The dynamic builds still run, as ld.elf_so aligns the block.
+		case $system.$arch.$name.$variant in netbsd.aarch64.tls.static | netbsd.riscv64.tls.static) continue ;; esac
 		printf '%s %s\n' "$name" "$variant" >>"$out/programs"
 		extra=""
 		# The shared object is built for each way the program is, and named for it, and the

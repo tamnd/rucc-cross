@@ -2,12 +2,12 @@
 #
 # One job builds and the others run, because the programs are cross compiled and the systems they
 # are for are virtual machines. The aarch64 and riscv64 machines are QEMU emulating the processor
-# on the amd64 runner, which is slow and is still fast enough for these small programs. The build job builds rucc from the compiler repository, GNU ld
-# for each system from the pinned binutils source, and each system's sysroot from its own
-# distribution sets, and links the programs with nothing but those three. The run jobs boot the
-# release as its installer leaves it, with no packages added, and run the programs there. So a
-# program that fails is rucc's fault or the linker's, and not the fault of a library the machine
-# had and the sysroot did not.
+# on the amd64 runner, which is slow and is still fast enough for these small programs. The build
+# job builds rucc from the compiler repository, GNU ld for each system from the pinned binutils
+# source, and each system's sysroot from its own distribution sets, and links the programs with
+# nothing but those three. The run jobs boot the release as its installer leaves it, with no
+# packages added, and run the programs there. So a program that fails is rucc's fault or the
+# linker's, and not the fault of a library the machine had and the sysroot did not.
 #
 # It is its own workflow rather than a job in the gate, because the gate builds nothing of the
 # compiler's and this builds it every time. It runs on a change to the scripts or the corpus it
