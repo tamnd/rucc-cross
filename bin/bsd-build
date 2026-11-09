@@ -1,7 +1,7 @@
 #!/bin/sh
 # Compile and link the BSD programs with rucc and GNU ld, for a stock BSD release.
 #
-# usage: RUCC=<rucc> bin/bsd-build freebsd|netbsd <out>
+# usage: RUCC=<rucc> bin/bsd-build freebsd|netbsd amd64|aarch64|riscv64 <out>
 #
 # The tree is the release's own, from bin/bsd-sysroot, and the linker is GNU ld from bin/bsd-ld,
 # which is what GCC on each BSD runs. The compiler is given the target, the tree and a -B for the
@@ -29,17 +29,23 @@ here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 say() { printf '%s\n' "$*" >&2; }
 die() { say "bsd-build: $*"; exit 1; }
 
-[ $# -eq 2 ] || die "usage: RUCC=<rucc> bin/bsd-build freebsd|netbsd <out>"
+[ $# -eq 3 ] || die "usage: RUCC=<rucc> bin/bsd-build freebsd|netbsd amd64|aarch64|riscv64 <out>"
 system=$1
-out=$2
+arch=$2
+out=$3
 [ -n "${RUCC:-}" ] || die "RUCC is not set, and it has to name the compiler"
+case $arch in
+amd64) cpu=x86_64 ;;
+aarch64 | riscv64) cpu=$arch ;;
+*) die "$arch is not amd64, aarch64 or riscv64" ;;
+esac
 case $system in
-freebsd) triple=x86_64-unknown-freebsd15.1 ;;
-netbsd) triple=x86_64-unknown-netbsd ;;
+freebsd) triple=$cpu-unknown-freebsd15.1 ;;
+netbsd) triple=$cpu-unknown-netbsd ;;
 *) die "$system is not freebsd or netbsd" ;;
 esac
 
-root=$("$here/bin/bsd-sysroot" "$system")
+root=$("$here/bin/bsd-sysroot" "$system" "$arch")
 ld=$("$here/bin/bsd-ld" "$triple")
 
 rm -rf "$out"
@@ -100,4 +106,4 @@ for program in $programs; do
 		fi
 	done
 done
-say "$system: $built built, $failed did not, the compiler's output is in $log"
+say "$system $arch: $built built, $failed did not, the compiler's output is in $log"
