@@ -1,0 +1,137 @@
+# rucc's programs on stock FreeBSD 15.1 and NetBSD 11.1.
+#
+# One job builds and the other two run, because the programs are cross compiled and the systems
+# they are for are virtual machines. The build job builds rucc from the compiler repository, GNU ld
+# for each system from the pinned binutils source, and each system's sysroot from its own
+# distribution sets, and links the programs with nothing but those three. The run jobs boot the
+# release as its installer leaves it, with no packages added, and run the programs there. So a
+# program that fails is rucc's fault or the linker's, and not the fault of a library the machine
+# had and the sysroot did not.
+#
+# It is its own workflow rather than a job in the gate, because the gate builds nothing of the
+# compiler's and this builds it every time. It runs on a change to the scripts or the corpus it
+# reads, every night after the nightly, and by hand against any branch of the compiler.
+
+name: bsd
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bin/bsd-*"
+      - "corpus/bsd/**"
+      - "corpus/exec/**"
+      - "corpus/glibc/**"
+      - "sysroots/manifest"
+      - "toolchains/manifest"
+      - "toolchains/binutils-*.patch"
+      - ".github/workflows/bsd.yml"
+  pull_request:
+    paths:
+      - "bin/bsd-*"
+      - "corpus/bsd/**"
+      - "corpus/exec/**"
+      - "corpus/glibc/**"
+      - "sysroots/manifest"
+      - "toolchains/manifest"
+      - "toolchains/binutils-*.patch"
+      - ".github/workflows/bsd.yml"
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      rucc-ref:
+        description: the branch, tag or commit of tamnd/rucc to build
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build for freebsd 15.1 and netbsd 11.1
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the compiler out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc
+          ref: ${{ inputs.rucc-ref || 'main' }}
+          path: rucc
+      # The linkers and the sysroots, which change only when a pin or the script that makes them
+      # does.
+      - name: cache the linkers and the sysroots
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/rucc-cross
+          key: bsd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest', 'sysroots/manifest', 'toolchains/binutils-*.patch', 'bin/bsd-ld', 'bin/bsd-sysroot') }}
+      - name: build the compiler
+        working-directory: rucc
+        run: |
+          cargo build --release -p rucc --bin rucc
+          git log -1 --format='rucc %H %s'
+      - name: build GNU ld for each system
+        run: |
+          ./bin/bsd-ld x86_64-unknown-freebsd15.1
+          ./bin/bsd-ld x86_64-unknown-netbsd
+      - name: build the programs
+        env:
+          RUCC: ${{ github.workspace }}/rucc/target/release/rucc
+        run: |
+          ./bin/bsd-build freebsd out/freebsd
+          ./bin/bsd-build netbsd out/netbsd
+      # A tar file, because an artifact does not keep the execute bit.
+      - name: pack them
+        run: tar -C out -cf bsd-programs.tar freebsd netbsd
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: bsd-programs
+          path: bsd-programs.tar
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: build-logs
+          path: out/*/build.log
+
+  freebsd:
+    name: run on freebsd 15.1 amd64
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: bsd-programs
+      - name: unpack them
+        run: tar -xf bsd-programs.tar
+      - name: start FreeBSD
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+      - name: run them
+        shell: freebsd {0}
+        run: |
+          freebsd-version
+          ./freebsd/run
+
+  netbsd:
+    name: run on netbsd 11.1 amd64
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: bsd-programs
+      - name: unpack them
+        run: tar -xf bsd-programs.tar
+      - name: start NetBSD
+        uses: vmactions/netbsd-vm@5957cf330aef2e6ddc63c604364c99ce2e02b91d # v1.5.3
+        with:
+          release: "11.1"
+      - name: run them
+        shell: netbsd {0}
+        run: ./netbsd/run

@@ -1,0 +1,4 @@
+thread 0 bump 40 direct 40 calls 2
+thread 1 bump 42 direct 42 calls 2
+thread 2 bump 44 direct 44 calls 2
+main shared 40 calls 0

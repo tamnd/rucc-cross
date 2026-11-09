@@ -1,0 +1,5 @@
+thread 0 counter 7 name 1 wide 1 aligned 1
+thread 1 counter 8 name 1 wide 1 aligned 1
+thread 2 counter 9 name 1 wide 1 aligned 1
+thread 3 counter 10 name 1 wide 1 aligned 1
+main counter 7 name 1 wide 1

@@ -1,0 +1,50 @@
+NetBSD's GNU ld makes a PT_PHDR segment for an output with a loadable .dynamic section, and the
+upstream one makes it only for an output with a loadable .interp section. bin/bsd-ld applies this
+to the upstream source for a NetBSD triple, so the linker it builds is the one NetBSD's GCC runs.
+
+The output it matters to is a static PIE. It has a .dynamic section and no .interp section, and
+NetBSD's crt0.o finds where the kernel loaded it from the PT_PHDR segment. With no PT_PHDR segment
+crt0.o does not relocate the program, and the program faults on its first relocated pointer.
+
+The change is the one in NetBSD's own copy, external/gpl3/binutils/dist/bfd/elf.c, for the
+binutils that toolchains/manifest pins.
+
+--- a/bfd/elf.c
++++ b/bfd/elf.c
+@@ -4832,6 +4832,10 @@
+     {
+       /* We need a PT_DYNAMIC segment.  */
+       ++segs;
++      /* And a PT_PHDR segment when there is no PT_INTERP, as NetBSD's
++	 ld makes one.  */
++      if (s == NULL || (s->flags & SEC_LOAD) == 0 || s->size == 0)
++	++segs;
+     }
+ 
+   if (info != NULL && info->relro)
+@@ -5190,7 +5194,13 @@
+ 	 the program headers and a PT_INTERP segment for the .interp
+ 	 section.  */
+       s = bfd_get_section_by_name (abfd, ".interp");
+-      if (s != NULL && (s->flags & SEC_LOAD) != 0 && s->size != 0)
++      if (s != NULL && ((s->flags & SEC_LOAD) == 0 || s->size == 0))
++	s = NULL;
++      /* NetBSD's ld makes a PT_PHDR segment for a PT_DYNAMIC one as well,
++	 and a static PIE's crt0 reads it to find where it was loaded.  */
++      dynsec = bfd_get_section_by_name (abfd, ".dynamic");
++      if (s != NULL
++	  || (dynsec != NULL && (dynsec->flags & SEC_LOAD) != 0))
+ 	{
+ 	  m = bfd_zalloc (abfd, sizeof (*m));
+ 	  if (m == NULL)
+@@ -5203,7 +5213,9 @@
+ 	  phdr_in_segment = true;
+ 	  *pm = m;
+ 	  pm = &m->next;
+-
++	}
++      if (s != NULL)
++	{
+ 	  m = bfd_zalloc (abfd, sizeof (*m));
+ 	  if (m == NULL)
+ 	    goto error_return;

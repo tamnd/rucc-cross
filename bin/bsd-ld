@@ -1,0 +1,106 @@
+#!/bin/sh
+# Build GNU ld for a BSD from the pinned binutils source, and print the directory it is in.
+#
+# usage: bin/bsd-ld <triple>
+#
+# The triple is the one binutils is configured for, such as x86_64-unknown-freebsd15.1 or
+# x86_64-unknown-netbsd. GCC on each BSD runs GNU ld, and the compiler hands that linker the whole
+# of GCC's line, so the BSD programs here are linked with it rather than with lld. No distribution
+# packages a GNU ld for a BSD, and so it is built: toolchains/manifest pins the source with a hash,
+# under the host `source`, because one tarball builds on every host. For NetBSD the source has
+# toolchains/binutils-netbsd-phdr.patch applied first, because NetBSD's own GNU ld has that change
+# and its start up code depends on it.
+#
+# Only ld and what it links against are built, which is about two minutes. The directory printed
+# is the one with a plain `ld` in it, which is what the compiler looks for in a `-B` directory. A
+# second run finds the finished build in the cache and prints the same directory at once.
+#
+# The cache is $RUCC_CROSS_CACHE, and it defaults to ~/.cache/rucc-cross.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+cache=${RUCC_CROSS_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rucc-cross}
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "bsd-ld: $*"; exit 1; }
+
+[ $# -eq 1 ] || die "usage: bin/bsd-ld <triple>"
+triple=$1
+case $triple in
+*-freebsd* | *-netbsd*) ;;
+*) die "$triple is not a FreeBSD or NetBSD triple" ;;
+esac
+
+sha256() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | cut -d' ' -f1
+	else
+		shasum -a 256 "$1" | cut -d' ' -f1
+	fi
+}
+
+line=$(awk -F'\t' '$1 == "binutils" && $3 == "source"' "$here/toolchains/manifest")
+[ -n "$line" ] || die "toolchains/manifest has no binutils source line"
+version=$(printf '%s' "$line" | cut -f2)
+want=$(printf '%s' "$line" | cut -f4)
+url=$(printf '%s' "$line" | cut -f5)
+
+# NetBSD's linker is upstream's with one change, which toolchains/binutils-netbsd-phdr.patch says,
+# and its build is named for the patch so a change to the patch is a new build.
+change=""
+into=$cache/binutils-$version-$triple
+case $triple in
+*-netbsd*)
+	change=$here/toolchains/binutils-netbsd-phdr.patch
+	into=$into-$(sha256 "$change" | cut -c1-12)
+	;;
+esac
+if [ -x "$into/$triple/bin/ld" ]; then
+	printf '%s\n' "$into/$triple/bin"
+	exit 0
+fi
+
+mkdir -p "$cache"
+archive=$cache/$(basename "$url")
+if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
+	say "fetching $url"
+	curl -fsSL --retry 3 -o "$archive.part" "$url"
+	mv "$archive.part" "$archive"
+fi
+got=$(sha256 "$archive")
+if [ "$got" != "$want" ]; then
+	rm -f "$archive"
+	die "$(basename "$url") hashed to $got and toolchains/manifest says $want"
+fi
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT INT TERM
+tar -xJf "$archive" -C "$work"
+if [ -n "$change" ]; then
+	patch -s -p1 -d "$work/binutils-$version" <"$change" || die "$(basename "$change") does not apply to binutils $version"
+fi
+
+# --with-sysroot with no directory turns on --sysroot, which the compiler passes on every link
+# for another machine, and gives the linker no default root of its own. MAKEINFO=true because ld's
+# manual is not wanted and the machine may have no makeinfo.
+jobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+# Straight into the cache rather than beside it and then moved, because the prefix is written into
+# the linker's search path. The check above looks for ld itself, which is the last file installed.
+rm -rf "$into"
+mkdir "$work/build"
+say "building GNU ld $version for $triple"
+(
+	cd "$work/build"
+	"$work/binutils-$version/configure" --target="$triple" --prefix="$into" \
+		--with-sysroot --disable-nls --disable-werror --disable-gdb --disable-gdbserver \
+		--disable-sim --disable-gprof --disable-gprofng --disable-libctf --without-zstd \
+		MAKEINFO=true >"$work/configure.log" 2>&1 ||
+		{ tail -n 40 "$work/configure.log" >&2; exit 1; }
+	make -j"$jobs" all-ld MAKEINFO=true >"$work/make.log" 2>&1 ||
+		{ tail -n 40 "$work/make.log" >&2; exit 1; }
+	make install-ld MAKEINFO=true >"$work/install.log" 2>&1 ||
+		{ tail -n 40 "$work/install.log" >&2; exit 1; }
+)
+"$into/$triple/bin/ld" --version | head -n 1 >&2
+printf '%s\n' "$into/$triple/bin"
