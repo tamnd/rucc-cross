@@ -4,7 +4,9 @@
  * own copy of crtbegin.o, the loader for a dynamic program and libc for a static one each walk an
  * array, so a constructor that does not run, or runs twice, is a section the linker put in the
  * wrong place or an entry the start files did not expect. The priorities decide the order inside
- * the arrays: the lower number runs first and its destructor last.
+ * the arrays: the lower number runs first. FreeBSD runs .fini_array last to first, so there its
+ * destructor runs last. NetBSD's crt0.o runs it first to last, so there its destructor runs first,
+ * and corpus/bsd/ctor.netbsd.expected says so. GCC's programs on NetBSD do the same.
  *
  * Every line goes out through write(2), because a destructor runs after main and the order of the
  * lines is the result. stdio would put them in one buffer and print them in the order they were

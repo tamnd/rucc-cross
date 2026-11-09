@@ -24,6 +24,7 @@ on:
       - "corpus/glibc/**"
       - "sysroots/manifest"
       - "toolchains/manifest"
+      - "toolchains/binutils-*.patch"
       - ".github/workflows/bsd.yml"
   pull_request:
     paths:
@@ -33,6 +34,7 @@ on:
       - "corpus/glibc/**"
       - "sysroots/manifest"
       - "toolchains/manifest"
+      - "toolchains/binutils-*.patch"
       - ".github/workflows/bsd.yml"
   schedule:
     - cron: "0 7 * * *"
@@ -67,7 +69,7 @@ jobs:
         uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/rucc-cross
-          key: bsd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest', 'sysroots/manifest', 'bin/bsd-ld', 'bin/bsd-sysroot') }}
+          key: bsd-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('toolchains/manifest', 'sysroots/manifest', 'toolchains/binutils-*.patch', 'bin/bsd-ld', 'bin/bsd-sysroot') }}
       - name: build the compiler
         working-directory: rucc
         run: |

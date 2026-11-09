@@ -64,7 +64,11 @@ built=0
 failed=0
 for program in $programs; do
 	name=${program#*/}
-	cp "$here/corpus/$program.expected" "$out/$name.expected"
+	# A system that runs a program differently has its own expected output: NetBSD runs the
+	# destructors in .fini_array first to last, where FreeBSD and glibc run them last to first.
+	expected=$here/corpus/$program.expected
+	[ -f "$here/corpus/$program.$system.expected" ] && expected=$here/corpus/$program.$system.expected
+	cp "$expected" "$out/$name.expected"
 	for variant in $variants; do
 		case $variant in
 		default) flags="" ;;

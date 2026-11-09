@@ -7,7 +7,9 @@
 # x86_64-unknown-netbsd. GCC on each BSD runs GNU ld, and the compiler hands that linker the whole
 # of GCC's line, so the BSD programs here are linked with it rather than with lld. No distribution
 # packages a GNU ld for a BSD, and so it is built: toolchains/manifest pins the source with a hash,
-# under the host `source`, because one tarball builds on every host.
+# under the host `source`, because one tarball builds on every host. For NetBSD the source has
+# toolchains/binutils-netbsd-phdr.patch applied first, because NetBSD's own GNU ld has that change
+# and its start up code depends on it.
 #
 # Only ld and what it links against are built, which is about two minutes. The directory printed
 # is the one with a plain `ld` in it, which is what the compiler looks for in a `-B` directory. A
@@ -44,7 +46,16 @@ version=$(printf '%s' "$line" | cut -f2)
 want=$(printf '%s' "$line" | cut -f4)
 url=$(printf '%s' "$line" | cut -f5)
 
+# NetBSD's linker is upstream's with one change, which toolchains/binutils-netbsd-phdr.patch says,
+# and its build is named for the patch so a change to the patch is a new build.
+change=""
 into=$cache/binutils-$version-$triple
+case $triple in
+*-netbsd*)
+	change=$here/toolchains/binutils-netbsd-phdr.patch
+	into=$into-$(sha256 "$change" | cut -c1-12)
+	;;
+esac
 if [ -x "$into/$triple/bin/ld" ]; then
 	printf '%s\n' "$into/$triple/bin"
 	exit 0
@@ -66,6 +77,9 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT INT TERM
 tar -xJf "$archive" -C "$work"
+if [ -n "$change" ]; then
+	patch -s -p1 -d "$work/binutils-$version" <"$change" || die "$(basename "$change") does not apply to binutils $version"
+fi
 
 # --with-sysroot with no directory turns on --sysroot, which the compiler passes on every link
 # for another machine, and gives the linker no default root of its own. MAKEINFO=true because ld's
