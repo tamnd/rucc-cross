@@ -47,6 +47,9 @@ bin/glibc-versions              record which releases changed which header, for 
 bin/glibc-startfiles            build glibc's start files and libc_nonshared.a, then link and run them
 bin/abilist x86_64              extract glibc's own symbol list, for the compiler's stub comparison
 bin/wasi-sysroot wasm32-wasip1  take the C part of one WASI preview out of the pinned wasi-sysroot
+bin/bsd-sysroot netbsd          unpack the sysroot of stock NetBSD 11.1, or FreeBSD 15.1, from its sets
+bin/bsd-ld x86_64-unknown-netbsd  build GNU ld for a BSD from the pinned binutils source
+bin/bsd-build netbsd out        link the BSD programs with rucc and that ld, for out/run on the BSD
 bin/sysroot --check a b         compare two manifests, which is the reproducibility check
 bin/lint                        the house rules
 ```
@@ -96,6 +99,8 @@ And it is reproducible, which for compiled output is a stronger statement than i
 `bin/abilist` fetches the pinned glibc source and takes one kind of file out of it: the abilist, which is glibc's own record of which symbol it exports at which version node, one file per architecture. That is the description the compiler writes its glibc stubs from, and `cargo xtask real-libc` over there writes a stub from it and holds it against the real `libc.so.6` on the machine, which `spec/cross-compile/09-libc-stubs.md` section 9.8 calls the highest value test in that document. The rule it checks is that the real library's symbols are a superset of ours, at the same versions, with the same sizes where there is storage to copy.
 
 It is here rather than there for the reason `bin/sysroot` is: a comparison against a real libc needs a real libc's description, the description is twenty megabytes of tarball away, and a compiler checkout should not be downloading a libc to run its own tests. Nothing is copied into this repository either, because an abilist is part of glibc and carries glibc's licence, and a pinned fetch into the cache avoids the question entirely. The nightly run does it on both host architectures, which is two real libcs, and two more than any amount of reading our own output gives.
+
+`bin/bsd-build` is the other place the compiler is run rather than the reference, and the only place the result runs on the system it was built for instead of under qemu. It links the executing corpus, the POSIX part of the glibc corpus and `corpus/bsd` for stock FreeBSD 15.1 and NetBSD 11.1, each with no options, at -O2 and static. The sysroot is the release's own distribution sets, unpacked by `bin/bsd-sysroot` and pinned in `sysroots/manifest`, and the linker is GNU ld built by `bin/bsd-ld`, because GNU ld is what GCC runs on both systems. The compiler gets the target, the sysroot and a `-B` for that ld and nothing else, so the start files and the link line are the ones it works out for itself. `corpus/bsd` is what each BSD does its own way: thread local storage in the program and in a shared object, and the order of constructors, destructors and atexit handlers. The `bsd` workflow builds rucc from its main branch, builds the programs, and boots each release in a virtual machine as its installer leaves it to run them with `out/run`, which prints one line per program and fails if any program did not build or did not print its expected output.
 
 Set `RUCC_CROSS_REFERENCE=gcc` to compare against the platform's cross gcc instead of zig, for the rows where one exists. That column is much sparser than the zig one and the sparseness is the argument for this whole line of work: a per target gcc has to exist as a package before you can compare against it, and for most of the table nobody has built one.
 
@@ -174,6 +179,7 @@ bin/                 the drivers, all POSIX sh
 corpus/layout        C that has to compile, with the reason for each assertion beside it
 corpus/abi           C that has to produce the same output everywhere
 corpus/exec          the smallest thing that proves a sysroot works
+corpus/bsd           what a BSD lays out its own way: thread local storage and start up code
 facts/               what the reference says about each target, recorded and checked in CI
 ```
 

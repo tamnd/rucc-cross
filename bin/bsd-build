@@ -1,0 +1,94 @@
+#!/bin/sh
+# Compile and link the BSD programs with rucc and GNU ld, for a stock BSD release.
+#
+# usage: RUCC=<rucc> bin/bsd-build freebsd|netbsd <out>
+#
+# The tree is the release's own, from bin/bsd-sysroot, and the linker is GNU ld from bin/bsd-ld,
+# which is what GCC on each BSD runs. The compiler is given the target, the tree and a -B for the
+# linker and nothing else, so the start files, the libraries and the link line are the ones the
+# compiler works out for itself.
+#
+# The programs are the executing corpus that runs everywhere: corpus/exec, the parts of
+# corpus/glibc that are POSIX rather than glibc, and corpus/bsd, which is the thread local storage
+# and the start up code that each BSD does its own way. Each is built three ways: with no options,
+# which is whatever kind of executable the compiler makes for the system by default, the same at
+# -O2, and a static program. dso.c is not built static, because it is a program and a shared
+# object.
+#
+# Nothing runs here, because this machine is not a BSD. <out> gets the programs, their expected
+# output, bin/bsd-run and a list of what was meant to be built, and bin/bsd-run on the BSD runs
+# them. A program that did not build is on the list and not in the directory, and bin/bsd-run
+# reports it as a failure, so the one report says what failed to build and what failed to run.
+# The compiler's own words for a failed build are in <out>/build.log.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+say() { printf '%s\n' "$*" >&2; }
+die() { say "bsd-build: $*"; exit 1; }
+
+[ $# -eq 2 ] || die "usage: RUCC=<rucc> bin/bsd-build freebsd|netbsd <out>"
+system=$1
+out=$2
+[ -n "${RUCC:-}" ] || die "RUCC is not set, and it has to name the compiler"
+case $system in
+freebsd) triple=x86_64-unknown-freebsd15.1 ;;
+netbsd) triple=x86_64-unknown-netbsd ;;
+*) die "$system is not freebsd or netbsd" ;;
+esac
+
+root=$("$here/bin/bsd-sysroot" "$system")
+ld=$("$here/bin/bsd-ld" "$triple")
+
+rm -rf "$out"
+mkdir -p "$out"
+cp "$here/bin/bsd-run" "$out/run"
+log=$out/build.log
+: >"$log"
+
+# The corpus, as directory and name.
+programs="exec/hello glibc/dirent glibc/math glibc/signal glibc/stat glibc/thread glibc/time"
+programs="$programs bsd/tls bsd/ctor bsd/dso"
+
+cc() {
+	printf '\n$ rucc %s\n' "$*" >>"$log"
+	"$RUCC" --target="$triple" --sysroot="$root" -B "$ld" "$@" >>"$log" 2>&1
+}
+
+built=0
+failed=0
+for program in $programs; do
+	name=${program#*/}
+	cp "$here/corpus/$program.expected" "$out/$name.expected"
+	for variant in default O2 static; do
+		case $variant in
+		default) flags="" ;;
+		O2) flags="-O2" ;;
+		static) flags="-static" ;;
+		esac
+		[ "$name.$variant" = dso.static ] && continue
+		printf '%s %s\n' "$name" "$variant" >>"$out/programs"
+		extra=""
+		# The shared object is built for each way the program is, and named for it, and the
+		# program finds it beside itself.
+		if [ "$name" = dso ]; then
+			lib=libdso.$variant.so
+			# shellcheck disable=SC2086
+			if ! cc $flags -shared -fPIC -Wl,-soname,"$lib" -o "$out/$lib" "$here/corpus/bsd/dso-lib.c"; then
+				say "$name $variant: the shared object did not build"
+				failed=$((failed + 1))
+				continue
+			fi
+			extra="$out/$lib -Wl,-rpath,\$ORIGIN"
+		fi
+		# shellcheck disable=SC2086
+		if cc $flags -pthread -o "$out/$name.$variant" "$here/corpus/$program.c" $extra -lm; then
+			built=$((built + 1))
+		else
+			say "$name $variant: did not build"
+			failed=$((failed + 1))
+		fi
+	done
+done
+say "$system: $built built, $failed did not, the compiler's output is in $log"

@@ -1,0 +1,43 @@
+#!/bin/sh
+# Run the programs bin/bsd-build made, on the BSD they were made for, and compare their output.
+#
+# usage: <dir>/run
+#
+# bin/bsd-build copies this script into its output directory as `run`, and the directory is all
+# it reads: the list of programs, the programs and their expected output. It runs on the BSD, so
+# it is POSIX sh with nothing a stock install does not have.
+#
+# Each line says ok or FAIL, the program and the way it was built. A program on the list that is
+# not in the directory did not build, and that is a failure too. The exit status is the number of
+# failures, up to 100, so a run with any failure fails.
+
+set -u
+
+dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+cd "$dir" || exit 100
+
+uname -srm
+passed=0
+failed=0
+while read -r name variant; do
+	program=./$name.$variant
+	if [ ! -x "$program" ]; then
+		printf 'FAIL %s %s: it did not build, see build.log\n' "$name" "$variant"
+		failed=$((failed + 1))
+		continue
+	fi
+	"$program" >"$name.$variant.out" 2>"$name.$variant.err"
+	status=$?
+	if [ $status -eq 0 ] && cmp -s "$name.$variant.out" "$name.expected"; then
+		printf 'ok   %s %s\n' "$name" "$variant"
+		passed=$((passed + 1))
+	else
+		printf 'FAIL %s %s: exit status %d\n' "$name" "$variant" "$status"
+		diff "$name.expected" "$name.$variant.out" | sed 's/^/    /'
+		sed 's/^/    stderr: /' "$name.$variant.err"
+		failed=$((failed + 1))
+	fi
+done <programs
+printf '%d passed, %d failed on %s\n' "$passed" "$failed" "$(uname -sr)"
+[ $failed -gt 100 ] && failed=100
+exit $failed
