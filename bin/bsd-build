@@ -12,8 +12,9 @@
 # corpus/glibc that are POSIX rather than glibc, and corpus/bsd, which is the thread local storage
 # and the start up code that each BSD does its own way. Each is built three ways: with no options,
 # which is whatever kind of executable the compiler makes for the system by default, the same at
-# -O2, and a static program. dso.c is not built static, because it is a program and a shared
-# object.
+# -O2, and a static program. On NetBSD a fourth time as a static PIE, which NetBSD's GCC links
+# and the others do not, and whose crt0.o relocates the program before anything else runs. dso.c
+# is not built static, because it is a program and a shared object.
 #
 # Nothing runs here, because this machine is not a BSD. <out> gets the programs, their expected
 # output, bin/bsd-run and a list of what was meant to be built, and bin/bsd-run on the BSD runs
@@ -56,18 +57,22 @@ cc() {
 	"$RUCC" --target="$triple" --sysroot="$root" -B "$ld" "$@" >>"$log" 2>&1
 }
 
+variants="default O2 static"
+[ "$system" = netbsd ] && variants="$variants static-pie"
+
 built=0
 failed=0
 for program in $programs; do
 	name=${program#*/}
 	cp "$here/corpus/$program.expected" "$out/$name.expected"
-	for variant in default O2 static; do
+	for variant in $variants; do
 		case $variant in
 		default) flags="" ;;
 		O2) flags="-O2" ;;
 		static) flags="-static" ;;
+		static-pie) flags="-static-pie" ;;
 		esac
-		[ "$name.$variant" = dso.static ] && continue
+		case $name.$variant in dso.static*) continue ;; esac
 		printf '%s %s\n' "$name" "$variant" >>"$out/programs"
 		extra=""
 		# The shared object is built for each way the program is, and named for it, and the
