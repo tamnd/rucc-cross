@@ -1,11 +1,12 @@
 #!/bin/sh
 # Unpack the sysroot of a stock BSD release from its own distribution sets, and print where it is.
 #
-# usage: bin/bsd-sysroot freebsd|netbsd
+# usage: bin/bsd-sysroot freebsd|netbsd amd64|aarch64|riscv64
 #
-# The sets are the ones the release's installer writes to disk, pinned with a hash in
-# sysroots/manifest: base.txz for FreeBSD, and base.tar.xz with comp.tar.xz for NetBSD, which
-# keeps the headers, the start files and the static libraries in comp. Nothing is built and
+# The sets are the ones the release's installer writes to disk for that machine, pinned with a hash
+# in sysroots/manifest: base.txz for FreeBSD, and base with comp for NetBSD, which keeps the
+# headers, the start files and the static libraries in comp. The rows are named for the system,
+# the machine and the set, such as netbsd-aarch64-comp. Nothing is built and
 # nothing is changed. A program linked against the tree is linked against the same files the
 # installed system loads, so a program that links here and fails to run there is the compiler's
 # fault or the linker's, and not the tree's.
@@ -24,11 +25,17 @@ pins=$here/sysroots/manifest
 say() { printf '%s\n' "$*" >&2; }
 die() { say "bsd-sysroot: $*"; exit 1; }
 
-[ $# -eq 1 ] || die "usage: bin/bsd-sysroot freebsd|netbsd"
-case $1 in
-freebsd) sets="freebsd-base" ;;
-netbsd) sets="netbsd-base netbsd-comp" ;;
-*) die "$1 is not freebsd or netbsd" ;;
+[ $# -eq 2 ] || die "usage: bin/bsd-sysroot freebsd|netbsd amd64|aarch64|riscv64"
+system=$1
+arch=$2
+case $arch in
+amd64 | aarch64 | riscv64) ;;
+*) die "$arch is not amd64, aarch64 or riscv64" ;;
+esac
+case $system in
+freebsd) sets="freebsd-$arch-base" ;;
+netbsd) sets="netbsd-$arch-base netbsd-$arch-comp" ;;
+*) die "$system is not freebsd or netbsd" ;;
 esac
 
 sha256() {
@@ -40,9 +47,9 @@ sha256() {
 }
 
 # The release is the version of the first set, and every set of one system has the same one.
-version=$(awk -F'\t' -v s="$1-base" '$1 == s { print $2; exit }' "$pins")
-[ -n "$version" ] || die "sysroots/manifest has no $1-base line"
-into=$cache/$1-$version-amd64
+version=$(awk -F'\t' -v s="$system-$arch-base" '$1 == s { print $2; exit }' "$pins")
+[ -n "$version" ] || die "sysroots/manifest has no $system-$arch-base line"
+into=$cache/$system-$version-$arch
 if [ -f "$into/.complete" ]; then
 	printf '%s\n' "$into"
 	exit 0
@@ -56,7 +63,7 @@ for set in $sets; do
 	[ "$(printf '%s' "$line" | cut -f2)" = "$version" ] || die "$set is not release $version"
 	want=$(printf '%s' "$line" | cut -f4)
 	url=$(printf '%s' "$line" | cut -f5)
-	archive=$cache/$1-$version-$(basename "$url")
+	archive=$cache/$system-$version-$arch-$(basename "$url")
 	if [ ! -f "$archive" ] || [ "$(sha256 "$archive")" != "$want" ]; then
 		say "fetching $url"
 		curl -fsSL --retry 3 -o "$archive.part" "$url"
@@ -68,14 +75,15 @@ for set in $sets; do
 		die "$(basename "$url") hashed to $got and sysroots/manifest says $want"
 	fi
 	# Each set names its files from ./, and a set without one of the three directories is fine:
-	# NetBSD's base has no usr/include, and its comp has no lib.
-	members=$(tar -tJf "$archive" | awk '
+	# NetBSD's base has no usr/include, and its comp has no lib. tar finds the compression for
+	# itself, which is xz for every set but NetBSD's riscv64 ones, which are gzip.
+	members=$(tar -tf "$archive" | awk '
 		/^\.\/(lib|usr\/lib|usr\/include)\// { split($0, part, "/"); top = part[2] == "usr" ? "./usr/" part[3] : "./" part[2]; seen[top] = 1 }
 		END { for (top in seen) print top }')
 	[ -n "$members" ] || die "$(basename "$url") has none of lib, usr/lib and usr/include in it"
 	say "unpacking $(basename "$url")"
 	# shellcheck disable=SC2086
-	tar -xJf "$archive" -C "$into" $members
+	tar -xf "$archive" -C "$into" $members
 done
 : >"$into/.complete"
 printf '%s\n' "$into"
