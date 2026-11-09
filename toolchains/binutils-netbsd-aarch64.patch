@@ -1,0 +1,62 @@
+Upstream GNU ld has no AArch64 NetBSD target: ld/configure.tgt has no aarch64-*-netbsd* line, so its
+configure stops on aarch64-unknown-netbsd, although bfd has the target. NetBSD's own GNU ld has the
+line and an emulation for it, aarch64nbsd, which is the linker NetBSD's GCC runs. bin/bsd-ld applies
+this to the upstream source for an AArch64 NetBSD triple, so the linker it builds is that one.
+
+ld/emulparams/aarch64nbsd.sh is NetBSD's file as it is on the netbsd-11 branch, in
+external/gpl3/binutils/dist/ld/emulparams. The configure.tgt line keeps only aarch64elf as an extra
+emulation, because nothing here links for the others that NetBSD's line names.
+diff -urN a/ld/configure.tgt b/ld/configure.tgt
+--- a/ld/configure.tgt
++++ b/ld/configure.tgt
+@@ -92,6 +92,9 @@
+ aarch64-*-freebsd*)	targ_emul=aarch64fbsd
+ 			targ_extra_emuls="aarch64fbsdb aarch64elf"
+ 			;;
++aarch64-*-netbsd*)	targ_emul=aarch64nbsd
++			targ_extra_emuls="aarch64elf"
++			;;
+ aarch64-*-fuchsia* | aarch64-*-phoenix*)
+ 			targ_emul=aarch64elf
+ 			targ_extra_emuls="aarch64elfb armelf armelfb"
+diff -urN a/ld/emulparams/aarch64nbsd.sh b/ld/emulparams/aarch64nbsd.sh
+--- a/ld/emulparams/aarch64nbsd.sh
++++ b/ld/emulparams/aarch64nbsd.sh
+@@ -0,0 +1,37 @@
++ARCH=aarch64
++MACHINE=
++NOP=0
++
++SCRIPT_NAME=elf
++ELFSIZE=64
++OUTPUT_FORMAT="elf64-littleaarch64"
++BIG_OUTPUT_FORMAT="elf64-bigaarch64"
++LITTLE_OUTPUT_FORMAT="elf64-littleaarch64"
++NO_REL_RELOCS=yes
++
++TEMPLATE_NAME=elf
++EXTRA_EM_FILE=aarch64elf
++
++GENERATE_SHLIB_SCRIPT=yes
++GENERATE_PIE_SCRIPT=yes
++
++MAXPAGESIZE="CONSTANT (MAXPAGESIZE)"
++COMMONPAGESIZE="CONSTANT (COMMONPAGESIZE)"
++SEPARATE_GOTPLT=24
++IREL_IN_PLT=
++
++TEXT_START_ADDR=0x200100000
++
++DATA_START_SYMBOLS='PROVIDE (__data_start = .);';
++
++# AArch64 does not support .s* sections.
++NO_SMALL_DATA=yes
++
++OTHER_BSS_SYMBOLS='__bss_start__ = .;'
++OTHER_BSS_END_SYMBOLS='_bss_end__ = . ; __bss_end__ = . ;'
++OTHER_END_SYMBOLS='__end__ = . ;'
++
++OTHER_SECTIONS='.note.gnu.arm.ident 0 : { KEEP (*(.note.gnu.arm.ident)) }'
++ATTRS_SECTIONS='.ARM.attributes 0 : { KEEP (*(.ARM.attributes)) KEEP (*(.gnu.attributes)) }'
++# Ensure each PLT entry is aligned to a cache line.
++PLT=".plt          ${RELOCATING-0} : ALIGN(16) { *(.plt)${IREL_IN_PLT+ *(.iplt)} }"
