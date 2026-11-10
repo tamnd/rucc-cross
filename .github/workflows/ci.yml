@@ -68,6 +68,24 @@ jobs:
       - name: the layout corpus compiles for every target
         run: ./bin/compile-corpus
 
+  # The FreeBSD and NetBSD facts against the GCC of each system. That GCC runs only on the BSD, so
+  # its `-dM -E` output comes from the bsd-predef probe of tamnd/rucc-compat, which makes it on
+  # the systems themselves. bin/bsd-facts says how.
+  bsd-facts:
+    name: the bsd facts against the gcc of each system
+    needs: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: check the probes out beside it
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: tamnd/rucc-compat
+          path: rucc-compat
+          sparse-checkout: probes/bsd-predef
+      - name: compare them
+        run: ./bin/bsd-facts rucc-compat/probes/bsd-predef/expected
+
   # The compiler's two generated corpora, written by `cargo xtask abi-corpus` and
   # `cargo xtask abi-signatures` over there and compiled against the reference over here. They run
   # on every commit to this repository as well as on every commit to the compiler, because a change
