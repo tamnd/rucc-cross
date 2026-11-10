@@ -1,0 +1,65 @@
+#!/bin/sh
+# Check the FreeBSD and NetBSD facts against the GCC of each system.
+#
+# usage: bin/bsd-facts <dir>
+#
+# The facts in facts/ come from zig, which runs here. The compiler that FreeBSD and NetBSD build
+# with is GCC, and that GCC runs only on the BSD. So the GCC side comes from the expected files of
+# the bsd-predef probe of tamnd/rucc-compat (probes/bsd-predef/expected). Its bsd-reference
+# workflow makes them on the systems themselves: the GCC packages of FreeBSD 15.1, and the in-tree
+# GCC of NetBSD 10, 11 and current. Each file starts with a `[default]` set, which is the output of
+# `gcc -dM -E` on an empty file.
+#
+# A file is named <system>-<release>-<arch>.txt, and it checks facts/<arch>-<system>.facts. Every
+# release of a system must agree with the one facts file, because rucc has one target for each
+# system and machine. A row with no facts file is reported and is not a failure. x86_64-openbsd
+# is not checked here, because the compiler of OpenBSD is clang and not GCC.
+#
+# The header lines are not compared, because they name the reference. A difference is a bug in
+# the facts file before it is a bug in rucc.
+
+set -eu
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+
+die() { printf 'bsd-facts: %s\n' "$*" >&2; exit 1; }
+
+[ $# -eq 1 ] || die "usage: bin/bsd-facts <dir of bsd-predef expected files>"
+dir=$1
+[ -d "$dir" ] || die "$dir is not a directory"
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+checked=0
+same=0
+bad=0
+for file in "$dir"/freebsd-*.txt "$dir"/netbsd-*.txt; do
+	[ -f "$file" ] || continue
+	row=$(basename "$file" .txt)
+	system=${row%%-*}
+	arch=${row##*-}
+	tuple=$arch-$system
+	facts=$here/facts/$tuple.facts
+	if [ ! -f "$facts" ]; then
+		printf 'none %s: there is no facts/%s.facts\n' "$row" "$tuple"
+		continue
+	fi
+	awk '/^\[/ { if (on) exit; on = ($1 == "[default]"); next } on' "$file" >"$tmp/macros"
+	[ -s "$tmp/macros" ] || die "$row: the file has no [default] set"
+	version=$(sed -n 's/^# version: //p' "$file" | head -n 1)
+	"$here/bin/facts" --from "$tmp/macros" "$tuple" "${version:-$row}" | grep -v '^#' >"$tmp/gcc"
+	grep -v '^#' "$facts" >"$tmp/recorded"
+	checked=$((checked + 1))
+	if diff -u "$tmp/recorded" "$tmp/gcc" >"$tmp/diff"; then
+		printf 'same %s: facts/%s.facts\n' "$row" "$tuple"
+		same=$((same + 1))
+	else
+		printf 'DIFF %s: facts/%s.facts\n' "$row" "$tuple"
+		sed 1,2d "$tmp/diff" | sed 's/^/    /'
+		bad=$((bad + 1))
+	fi
+done
+[ "$checked" -gt 0 ] || die "$dir has no freebsd-*.txt or netbsd-*.txt files"
+printf '%d rows checked, %d same, %d different\n' "$checked" "$same" "$bad"
+[ "$bad" -eq 0 ]

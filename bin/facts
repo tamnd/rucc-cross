@@ -5,6 +5,8 @@
 #        bin/facts --all
 #        bin/facts --record         write facts/<tuple>.facts for every target
 #        bin/facts --check          fail if any file in facts/ is out of date
+#        bin/facts --from <file> <tuple> <reference>
+#                                   the facts of <tuple> from a saved `-dM -E` output in <file>
 #
 # The facts come out of the preprocessor rather than out of a program, because a program has to
 # run and most of this table has no machine to run on. `cc -dM -E` on an empty file is one
@@ -70,9 +72,13 @@ runnable() {
 # missing `__SIZEOF_INT128__` means the target has no `__int128` and that is a fact, not a gap.
 one() {
 	tuple=$1
-	by=$(reference_of "$tuple")
-	macros=$(RUCC_CROSS_REFERENCE=$by "$here/bin/reference-cc" "$tuple" -dM -E -x c /dev/null 2>/dev/null) ||
-		die "$tuple: the reference compiler would not preprocess an empty file"
+	if [ -n "${from:-}" ]; then
+		macros=$(cat "$from") || die "$tuple: cannot read $from"
+	else
+		by=$(reference_of "$tuple")
+		macros=$(RUCC_CROSS_REFERENCE=$by "$here/bin/reference-cc" "$tuple" -dM -E -x c /dev/null 2>/dev/null) ||
+			die "$tuple: the reference compiler would not preprocess an empty file"
+	fi
 
 	# The body of a macro is everything after its name, and it is taken by length rather than by
 	# field, because an object-like macro with an empty body is a line with nothing after the
@@ -84,12 +90,21 @@ one() {
 	emit() { if [ -n "$2" ]; then printf '%s=%s\n' "$1" "$2"; fi; }
 
 	printf '# %s\n' "$tuple"
-	printf '# reference: %s %s\n' "$by" "$(version_of "$by")"
+	if [ -n "${from:-}" ]; then
+		printf '# reference: %s\n' "$from_reference"
+	else
+		printf '# reference: %s %s\n' "$by" "$(version_of "$by")"
+	fi
 
 	{
 		emit char_bit "$(value __CHAR_BIT__)"
 		if defined __CHAR_UNSIGNED__; then emit char_signed no; else emit char_signed yes; fi
-		if defined __WCHAR_UNSIGNED__; then emit wchar_signed no; else emit wchar_signed yes; fi
+		# clang says `__WCHAR_UNSIGNED__` and GCC does not. Both say `__WCHAR_MIN__`, which is 0U
+		# for an unsigned wchar_t.
+		case $(value __WCHAR_MIN__) in
+		0U | 0u | 0) emit wchar_signed no ;;
+		*) if defined __WCHAR_UNSIGNED__; then emit wchar_signed no; else emit wchar_signed yes; fi ;;
+		esac
 
 		case $(value __BYTE_ORDER__) in
 		__ORDER_BIG_ENDIAN__) emit endian big ;;
@@ -158,6 +173,14 @@ case ${1:-} in
 	done
 	[ "$bad" -eq 0 ] || die "run bin/facts --record and read the diff before committing it"
 	printf 'facts: every file matches the compiler its header names\n' >&2
+	;;
+--from)
+	# A saved `-dM -E` output, for a reference that does not run here. bin/bsd-facts uses it for
+	# the GCC of each BSD, which runs only on the BSD.
+	[ $# -eq 4 ] || die "usage: bin/facts --from <file> <tuple> <reference>"
+	from=$2
+	from_reference=$4
+	one "$3"
 	;;
 *)
 	for tuple in "$@"; do one "$tuple"; done
