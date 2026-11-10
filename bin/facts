@@ -99,8 +99,8 @@ one() {
 	{
 		emit char_bit "$(value __CHAR_BIT__)"
 		if defined __CHAR_UNSIGNED__; then emit char_signed no; else emit char_signed yes; fi
-		# clang says `__WCHAR_UNSIGNED__` and GCC does not. GCC says `__WCHAR_MIN__`, which is 0U
-		# or 0 for an unsigned wchar_t, and clang does not.
+		# clang says `__WCHAR_UNSIGNED__` and GCC does not. Both say `__WCHAR_MIN__`, which is 0U
+		# for an unsigned wchar_t.
 		case $(value __WCHAR_MIN__) in
 		0U | 0u | 0) emit wchar_signed no ;;
 		*) if defined __WCHAR_UNSIGNED__; then emit wchar_signed no; else emit wchar_signed yes; fi ;;
